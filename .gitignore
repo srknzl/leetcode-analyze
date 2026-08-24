@@ -1,0 +1,8 @@
+# Exported data: contains a live browser login session. Never commit.
+leetcode_export/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
