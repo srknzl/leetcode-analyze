@@ -21,6 +21,7 @@ import json
 import os
 import random
 import re
+import hashlib
 import statistics
 import sys
 import time
@@ -914,6 +915,75 @@ def save_state(outdir: Path, state: dict) -> None:
 # Phase 5: rollup + deterministic statistics + the LLM briefing
 # --------------------------------------------------------------------------
 
+PASTE_GAP_SECONDS = 120       # nobody reads, thinks and types a Medium in two minutes
+REWRITE_SIMILARITY = 0.5      # below this, consecutive attempts are a rewrite, not a fix
+BENCHMARK_SIMILARITY = 0.9    # above this, it is the same code submitted again
+
+
+def _line_set(outdir: Path | None, rel_path: str) -> set[str] | None:
+    """Non-blank, stripped lines of one solution file. Cheap stand-in for a
+    real diff: order and whitespace churn do not matter here, content does."""
+    if not outdir or not rel_path:
+        return None
+    try:
+        text = (outdir / rel_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    return {ln.strip() for ln in text.splitlines() if ln.strip()} or None
+
+
+def _jaccard(a: set[str] | None, b: set[str] | None) -> float | None:
+    if not a or not b:
+        return None
+    return round(len(a & b) / len(a | b), 3)
+
+
+def annotate_rows(rows: list[dict], outdir: Path | None = None) -> list[dict]:
+    """Tag each row with the timing and code-similarity facts that separate my
+    own problem solving from pasted code and from runtime benchmarking.
+
+    The timing figure is a genuine upper bound and nothing more: if the previous
+    submission landed 40 seconds ago, this problem got at most 40 seconds of my
+    attention. A long gap proves nothing in either direction.
+    """
+    ordered = sorted(rows, key=lambda r: r["timestamp"])
+    prev_ts: int | None = None
+    prev_on_problem: dict[str, tuple[int, set[str] | None]] = {}
+
+    for row in ordered:
+        ts, slug = row["timestamp"], row.get("titleSlug", "")
+        lines = _line_set(outdir, row.get("code_file_path", ""))
+        last = prev_on_problem.get(slug)
+
+        row["gap_before"] = None if prev_ts is None else ts - prev_ts
+        row["gap_on_problem"] = None if last is None else ts - last[0]
+        row["similarity_to_previous"] = _jaccard(lines, last[1]) if last else None
+        row["code_hash"] = (hashlib.md5("\n".join(sorted(lines)).encode()).hexdigest()[:12]
+                            if lines else None)
+
+        prev_ts, prev_on_problem[slug] = ts, (ts, lines)
+    return ordered
+
+
+def classify_attempt(row: dict, is_first_attempt: bool) -> str:
+    """`own`, `pasted` or `resubmission`. A heuristic, deliberately conservative:
+    anything it cannot argue for is left as `own`."""
+    sim, gap = row.get("similarity_to_previous"), row.get("gap_on_problem")
+    if sim is not None and gap is not None and gap <= PASTE_GAP_SECONDS:
+        if sim >= BENCHMARK_SIMILARITY:
+            return "resubmission"      # same code again -- a runtime measurement
+        if sim < REWRITE_SIMILARITY:
+            return "pasted"            # wholesale replacement, not a fix
+    if (is_first_attempt and row.get("status_display") == "Accepted"
+            and row.get("difficulty") != "Easy"):
+        # Straight to Accepted on a Medium/Hard, minutes after the previous
+        # submission: there was no window in which to solve it.
+        gap_before = row.get("gap_before")
+        if gap_before is not None and gap_before <= PASTE_GAP_SECONDS:
+            return "pasted"
+    return "own"
+
+
 def summarize_attempts(problem_rows: list[dict], catalog: dict | None = None) -> dict:
     """Roll up every attempt at one problem. Used for attempts_summary.json
     and for the flat `problems` index in analysis_summary.json."""
@@ -930,6 +1000,32 @@ def summarize_attempts(problem_rows: list[dict], catalog: dict | None = None) ->
     first_accepted = rows[accepted_at]["timestamp"] if solved else None
     tags = [t for t in (first.get("topic_tags") or "").split(";") if t]
 
+    # Everything after the first Accept is revisiting, optimising or measuring
+    # runtime -- never first-solve effort. Keeping it out of the diagnostic
+    # counts is structural, not a guess.
+    solve_window = rows[:accepted_at + 1] if solved else rows
+    post_solve = rows[accepted_at + 1:] if solved else []
+    statuses = Counter(r.get("status_display") or "Unknown" for r in solve_window)
+    provenance = Counter(classify_attempt(r, i == 0) for i, r in enumerate(rows))
+
+    attempt_files, seen_hash = [], {}
+    for i, r in enumerate(rows):
+        path = r.get("code_file_path")
+        if not path:
+            continue
+        digest = r.get("code_hash")
+        attempt_files.append({
+            "path": path,
+            "status": r.get("status_display"),
+            "utc": iso_utc(r["timestamp"]),
+            "phase": "solve" if i < len(solve_window) else "post_solve",
+            "same_code_as": seen_hash.get(digest) if digest else None,
+        })
+        if digest and digest not in seen_hash:
+            seen_hash[digest] = path
+    pasted_in_solve = sum(1 for i, r in enumerate(rows[:len(solve_window)])
+                          if classify_attempt(r, i == 0) == "pasted")
+
     return {
         "titleSlug": slug,
         "title": first.get("title") or slug,
@@ -937,11 +1033,31 @@ def summarize_attempts(problem_rows: list[dict], catalog: dict | None = None) ->
         "frontend_id": (catalog.get(slug) or {}).get("frontendQuestionId"),
         "topic_tags": tags,
         "total_attempts": len(rows),
+        "solve_attempts": len(solve_window),
         "status_breakdown": dict(statuses.most_common()),
+        "post_solve_submissions": len(post_solve),
+        "post_solve_status_breakdown": dict(Counter(
+            r.get("status_display") or "Unknown" for r in post_solve).most_common()),
         "languages_used": sorted({r.get("lang") for r in rows if r.get("lang")}),
         "solved": solved,
         "attempts_to_accept": attempts_to_accept,
         "clean_solve": attempts_to_accept == 1 if solved else False,
+        "suspect_pasted_attempts": provenance.get("pasted", 0),
+        "resubmissions": provenance.get("resubmission", 0),
+        "self_solved": solved and pasted_in_solve == 0,
+        # The read-these-first pointers: the first Accept is the code I actually
+        # arrived at, the failures before it are the mistakes worth reading.
+        "first_accepted_file": (rows[accepted_at].get("code_file_path") if solved
+                                else None),
+        "failed_attempt_files": [r.get("code_file_path") for r in solve_window
+                                 if r.get("status_display") != "Accepted"
+                                 and r.get("code_file_path")],
+        # Every attempt, in order, for a full read. `same_code_as` marks a file
+        # whose contents are identical to an earlier attempt -- skipping those
+        # loses nothing, they are the same text.
+        "attempt_files": attempt_files,
+        "max_seconds_before_first_accept": (rows[accepted_at].get("gap_before")
+                                            if solved else None),
         "first_attempt_timestamp": first["timestamp"],
         "first_attempt_utc": iso_utc(first["timestamp"]),
         "last_attempt_timestamp": last["timestamp"],
@@ -975,6 +1091,9 @@ def build_analysis(rows: list[dict], catalog: dict | None = None, failed_count: 
     catalog = catalog or {}
     now = int(generated_at if generated_at is not None else time.time())
 
+    if rows and "gap_before" not in rows[0]:
+        rows = annotate_rows(rows)      # timing only; similarity needs the files
+
     by_slug: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
         by_slug[row.get("titleSlug", "")].append(row)
@@ -993,6 +1112,7 @@ def build_analysis(rows: list[dict], catalog: dict | None = None, failed_count: 
     for tag, tagged in topics.items():
         solved = [p for p in tagged if p["solved"]]
         clean = [p for p in solved if p["clean_solve"]]
+        self_solved = [p for p in tagged if p["self_solved"]]
         attempts = [p["attempts_to_accept"] for p in solved]
         breakdown: Counter = Counter()
         for p in tagged:
@@ -1004,12 +1124,16 @@ def build_analysis(rows: list[dict], catalog: dict | None = None, failed_count: 
             "problems_attempted": len(tagged),
             "problems_solved": len(solved),
             "solve_rate": round(len(solved) / len(tagged), 3),
+            "problems_self_solved": len(self_solved),
+            "self_solve_rate": round(len(self_solved) / len(tagged), 3),
             "clean_solves": len(clean),
             "first_attempt_accept_rate": round(len(clean) / len(tagged), 3),
             "median_attempts_to_accept": (round(statistics.median(attempts), 2)
                                           if attempts else None),
             "total_submissions": sum(breakdown.values()),
             "status_breakdown": dict(breakdown.most_common()),
+            "post_solve_submissions": sum(p["post_solve_submissions"] for p in tagged),
+            "suspect_pasted_attempts": sum(p["suspect_pasted_attempts"] for p in tagged),
             "unsolved_problems": sorted(
                 ({"titleSlug": p["titleSlug"], "title": p["title"],
                   "difficulty": p["difficulty"], "attempts": p["total_attempts"],
@@ -1063,6 +1187,10 @@ def build_analysis(rows: list[dict], catalog: dict | None = None, failed_count: 
         "submission_acceptance_rate": (round(statuses.get("Accepted", 0) / len(rows), 3)
                                        if rows else 0.0),
         "clean_solves": sum(1 for p in solved_all if p["clean_solve"]),
+        "problems_self_solved": sum(1 for p in plist if p["self_solved"]),
+        "post_solve_submissions": sum(p["post_solve_submissions"] for p in plist),
+        "suspect_pasted_attempts": sum(p["suspect_pasted_attempts"] for p in plist),
+        "resubmissions": sum(p["resubmissions"] for p in plist),
         "status_counts": dict(statuses.most_common()),
         "by_difficulty": {d: s for d in ("Easy", "Medium", "Hard")
                           if (s := _difficulty_slice(plist, d))},
@@ -1094,7 +1222,7 @@ PROMPT_SCHEMA = """
 | `overview` | totals, date range, status counts, per-difficulty counts, completeness flags |
 | `by_topic` | one entry per topic tag, sorted by how much I have practised it |
 | `by_month` | per-calendar-month activity: the trajectory |
-| `problems` | flat list, one entry per problem, most recently attempted first |
+| `review_bundles` (in `overview`) | how many bundles the per-problem detail was split into -- see `review/` |
 
 Key fields inside `by_topic`:
 
@@ -1102,11 +1230,26 @@ Key fields inside `by_topic`:
 |---|---|
 | `problems_attempted` / `problems_solved` / `solve_rate` | coverage and outcome |
 | `clean_solves` / `first_attempt_accept_rate` | solved with **zero** failed attempts -- the sharpest mastery signal |
+| `problems_self_solved` / `self_solve_rate` | solved with no attempt flagged as pasted -- mastery, with the copy-paste removed |
+| `post_solve_submissions` | submissions made *after* the problem was already solved -- re-runs and runtime measurement, excluded from `status_breakdown` |
+| `suspect_pasted_attempts` | attempts the paste heuristic flagged (see section 2b) |
 | `median_attempts_to_accept` | how much grinding a solve costs on this topic (solved problems only) |
-| `status_breakdown` | counts of Accepted / Wrong Answer / Time Limit Exceeded / Runtime Error / ... |
+| `status_breakdown` | counts of Accepted / Wrong Answer / ... **up to and including the first Accept only** |
 | `unsolved_problems` | attempted but never accepted -- the sharpest weakness signal |
 | `days_since_last_practice` | staleness, for spaced repetition |
 | `by_difficulty` | the same coverage numbers split Easy / Medium / Hard |
+| `review_files` | which `review/*.json` bundles hold this topic's problems |
+
+### `review/` -- the per-problem detail, split so it fits
+
+The per-problem entries are far too large to sit in one file, so they are split
+into bundles: `review/<topic>.json`, each problem in **exactly one** bundle,
+filed under its most specific tag. Every bundle holds the full entries --
+including `failed_attempt_files` and `first_accepted_file` -- for its problems,
+sorted with the most-failed problems first.
+
+`review/_index.json` maps every `titleSlug` to the bundle holding it, for when
+you need one specific problem.
 
 ### `submissions_all.csv` -- one row per SUBMISSION (not per problem)
 
@@ -1120,6 +1263,40 @@ Key fields inside `by_topic`:
 One file per attempt, named `<timestamp>_<Status>_<lang>_<id>.<ext>`, so the
 failed attempts and the eventual accepted one sit side by side in the same
 folder. Each folder also has an `attempts_summary.json` rollup.
+
+**Do not go hunting through these folders.** Every problem entry in
+`analysis_summary.json` names the two files worth opening directly:
+
+| Field | What it points at |
+|---|---|
+| `first_accepted_file` | the *first* passing solution -- the code I actually arrived at, before any later tidying or optimising |
+| `failed_attempt_files` | every Wrong Answer / TLE / Runtime Error that came before it, in order -- the mistakes themselves |
+
+Read those two together and the diagnosis falls out: what I got wrong, and what
+I changed to fix it. Later Accepted files on the same problem are re-runs and
+say nothing about how I think.
+
+## 2b. Pasted code, and why some numbers are split
+
+Some submissions are not my own problem solving. They are editorial or
+LLM-generated code, pasted in and submitted -- often just to see the runtime.
+Counting those as solves would overstate my ability on exactly the topics I am
+weakest at, so the data separates them two ways.
+
+**Structural, and certain:** anything submitted *after* a problem was first
+Accepted is a revisit, not first-solve effort. It is counted in
+`post_solve_submissions` and kept out of `status_breakdown`. No guesswork --
+first-solve effort simply cannot happen after the problem is already solved.
+
+**Heuristic, and fallible:** `suspect_pasted_attempts` counts attempts flagged
+by timing and code similarity -- a wholesale rewrite between two submissions
+made a minute apart, or a Medium/Hard going straight to Accepted moments after
+the previous submission, leaving no window in which to have solved it.
+
+Treat the heuristic as a reason to *discount*, never as proof. It cannot see
+pasted code submitted after a long pause, and it will occasionally flag a
+genuine fast solve. When a topic's `self_solve_rate` sits well below its
+`solve_rate`, say so and lean on the lower number -- but say which one you used.
 
 ### `problem_catalog.json`
 
@@ -1139,21 +1316,90 @@ ignore it.
   failed.** These are gaps in the record. Never read them as weaknesses.
 - **Topic totals overlap.** Most problems carry several tags, so per-topic
   counts deliberately do not sum to the overall total.
+- **`total_attempts` and `status_breakdown` no longer match.** The breakdown
+  stops at the first Accept; `post_solve_submissions` holds the rest. That gap
+  is intentional, not a bug.
 - Timestamps are UTC epoch seconds. `status_display` values are LeetCode's own
   raw strings.
 
-## 3. How to work through this efficiently
+## 3. The job: read every file, one bundle at a time
 
-1. **Read `analysis_summary.json` first.** Every rate, median and count in it
-   was computed deterministically. Use those numbers rather than recomputing
-   them from the CSV -- that is what they are for.
-2. **Do not bulk-read `solutions/`.** It holds thousands of files.
-3. **Then drill, selectively.** Take the 3-5 weakest topics. For each, open
-   2-3 *failed* attempts plus the accepted solution for the same problem and
-   compare the approaches. This is the step that turns statistics into a
-   diagnosis -- "the DP failures are consistently wrong state definitions, not
-   implementation bugs" is worth far more than "DP solve rate is 46%".
-4. Fall back to the CSV only for ordering or detail the summary does not cover.
+> **Resuming?** If `findings/` already has files in it, this job is part-done.
+> Do not start over. Skip to "Each chunk" below, take the next bundle with no
+> findings file, and carry on. "Continue" is all the instruction you need.
+
+I want the mistakes and the habits in my actual code found and named. Not a
+summary of the statistics -- the statistics only tell you where to look. Read
+the accepted solutions too: a solution that passed can still be quadratic, or
+unreadable, or lucky, and those patterns matter as much as the failures.
+
+**This is a large job and it will not fit in one context.** All the code runs to
+roughly __CODE_TOKENS__ tokens across __BUNDLES__ bundles. So it is built to be
+done in chunks, across as many sessions as it takes.
+
+### How progress is tracked
+
+**A bundle is done when `findings/<topic>.json` exists.** That is the entire
+mechanism -- there is no state file to update and nothing to corrupt. Any
+session can pick up where the last one stopped.
+
+### Each chunk
+
+1. List `review/*.json` and `findings/*.json`. The difference is the work left.
+   If `findings/` does not exist yet, create it.
+2. Take the next unfinished bundle. If you have subagents, run several in
+   parallel -- bundles are fully independent. Otherwise do them one at a time
+   and drop the code from context between bundles.
+3. For that bundle: read `review/<topic>.json`, then read **every** file listed
+   in each problem's `attempt_files` -- accepted and failed alike.
+   - Skip any entry whose `same_code_as` is set. It is byte-identical to the
+     file it names; reading it again tells you nothing.
+   - Entries with `"phase": "post_solve"` came after the problem was already
+     solved. Still read them -- they show how I optimise -- but never count
+     them as first-solve effort.
+   - Ignore problems with a non-zero `suspect_pasted_attempts` when judging how
+     I think: that code may not be mine.
+4. Write `findings/<topic>.json` before moving on, so the work survives:
+
+   ```json
+   {
+     "topic": "<slug>",
+     "problems_read": 0,
+     "files_read": 0,
+     "mistakes": [{"problem": "<slug>", "file": "<path>", "status": "Wrong Answer",
+                   "what_went_wrong": "off-by-one in the binary-search upper bound",
+                   "how_it_was_fixed": "changed hi = n-1 to hi = n"}],
+     "smells_in_accepted_code": [{"problem": "<slug>", "file": "<path>",
+                                  "smell": "O(n^2) scan where a prefix sum was enough"}],
+     "style_notes": ["reaches for dict-of-lists before defaultdict",
+                     "names loop variables i/j/k even in nested logic",
+                     "writes the recursion first, converts to iterative only after TLE"],
+     "patterns_within_topic": ["..."],
+     "strengths": ["..."]
+   }
+   ```
+
+   Be specific. "Off-by-one in the binary-search upper bound" is worth
+   something; "logic error" is not.
+
+   `style_notes` is about **how I write**, not whether it passed: naming,
+   structure, which constructs I reach for, whether I comment, how I handle
+   edge cases, whether I decompose or write one long function. Note it from the
+   accepted code as much as the failed code -- a solution that passed still
+   shows my habits.
+5. When you run low on context, stop cleanly. Say which bundles are done and
+   how many remain, and tell me to start a fresh session and point it back at
+   this file. Do not try to finish everything in one go.
+
+### The reduce step, once every bundle has findings
+
+Read all of `findings/*.json` -- they are small -- and write `REPORT.md`
+covering section 4 below. The point of this step is what repeats **across**
+topics: a mistake I make in three unrelated topics is a habit, and worth more
+than any single-topic statistic. Group the findings into named recurring
+errors, each with its count and the specific problems as evidence.
+
+Never bulk-read `solutions/` directly. Go bundle by bundle.
 
 ## 4. The analysis I want
 
@@ -1168,6 +1414,18 @@ mode. The status breakdown tells you which:
 - **Entries in `unsolved_problems`** -> I never got there at all
 
 ### Strong areas
+**How I write code.** A characterisation drawn from the whole corpus, not one
+sample: the constructs I reach for, how I name and structure things, my default
+approach to a new problem, what I do when the first attempt fails, and how my
+style changed over the years the export covers. Be blunt and specific -- this
+should read as a recognisable portrait of me as a programmer, backed by files
+you actually read.
+
+**Recurring mistakes, ranked by how often they actually occur.** The other
+main deliverable. For each: a name, what it is, how many times it happened,
+which problems and files, and what to do differently. Order by frequency, not
+by how interesting they are.
+
 Separate genuine mastery (high `first_attempt_accept_rate`) from grind (solved,
 but a high `median_attempts_to_accept`). They are different skills and need
 different follow-up -- say which is which.
@@ -1255,7 +1513,63 @@ in here.
             f"record, **not** problems I failed.")
     if caveats:
         header += "\n### Coverage caveats\n\n" + "\n".join(caveats) + "\n"
-    return header + PROMPT_SCHEMA
+    body = PROMPT_SCHEMA.replace(
+        "__CODE_TOKENS__", f"{round(o.get('code_bytes', 0) / 3800):,}K").replace(
+        "__BUNDLES__", str(o.get("review_bundles", 0)))
+    return header + body
+
+
+def review_buckets(problems: list[dict]) -> dict[str, list[dict]]:
+    """Split the problems into one bundle per topic, each problem in exactly one
+    bundle. The rarest tag wins: `monotonic-stack` says far more about a problem
+    than `array` does, and assigning to a single bundle means each solution file
+    gets read once instead of once per tag.
+    """
+    freq = Counter(tag for p in problems for tag in p["topic_tags"])
+    buckets: dict[str, list[dict]] = defaultdict(list)
+    for problem in problems:
+        tags = problem["topic_tags"]
+        key = min(tags, key=lambda t: (freq[t], t)) if tags else "untagged"
+        buckets[key].append(problem)
+    for entries in buckets.values():
+        # Richest material first, so a reader working top-down hits the
+        # problems with the most failures before running out of room.
+        entries.sort(key=lambda p: (-len(p["failed_attempt_files"]), p["titleSlug"]))
+    return dict(buckets)
+
+
+def write_review_bundles(outdir: Path, problems: list[dict], by_topic: list[dict],
+                         tag_names: dict) -> dict:
+    """Write review/<topic>.json and point every topic at the bundles holding
+    its problems. Returns the index."""
+    review = outdir / "review"
+    review.mkdir(parents=True, exist_ok=True)
+    for stale in review.glob("*.json"):
+        stale.unlink()          # derived data, rebuilt in full every time
+
+    buckets = review_buckets(problems)
+    index, files_for_tag = {}, defaultdict(set)
+    for topic, entries in buckets.items():
+        name = f"{safe_component(topic)}.json"
+        failing = [p for p in entries if p["failed_attempt_files"]]
+        save_json(review / name, {
+            "topic": topic,
+            "name": tag_names.get(topic, topic),
+            "problems_in_bundle": len(entries),
+            "problems_with_failures": len(failing),
+            "failed_attempts": sum(len(p["failed_attempt_files"]) for p in failing),
+            "read_these_first": [p["titleSlug"] for p in failing[:20]],
+            "problems": entries,
+        })
+        for problem in entries:
+            index[problem["titleSlug"]] = f"review/{name}"
+            for tag in problem["topic_tags"]:
+                files_for_tag[tag].add(f"review/{name}")
+
+    for topic in by_topic:
+        topic["review_files"] = sorted(files_for_tag.get(topic["topic"], []))
+    save_json(review / "_index.json", index)
+    return index
 
 
 def rebuild(outdir: Path, state: dict | None = None, catalog: dict | None = None) -> None:
@@ -1264,6 +1578,7 @@ def rebuild(outdir: Path, state: dict | None = None, catalog: dict | None = None
     if not rows:
         log("  No submissions on disk yet -- nothing to summarise.")
         return
+    rows = annotate_rows(rows, outdir)   # reads the code files: paste detection
     if state is None:
         state = load_json(outdir / "state.json", new_state())
     if catalog is None:
@@ -1274,11 +1589,23 @@ def rebuild(outdir: Path, state: dict | None = None, catalog: dict | None = None
     with csv_path.open(newline="", encoding="utf-8") as fh:
         raw_count = sum(1 for _ in csv.reader(fh)) - 1
     if raw_count > len(rows):
-        log(f"  Removing {raw_count - len(rows)} duplicate rows from the CSV")
-        with csv_path.open("w", newline="", encoding="utf-8") as fh:
+        # The CSV is the durable ledger, so never truncate it in place: write a
+        # sibling and swap it in atomically. And if a fetch is appending to it
+        # right now, leave it alone entirely -- a tidier file is worth nothing
+        # next to the rows we would drop.
+        tmp = csv_path.with_suffix(".csv.tmp")
+        with tmp.open("w", newline="", encoding="utf-8") as fh:
             writer = csv.DictWriter(fh, fieldnames=CSV_COLUMNS, extrasaction="ignore")
             writer.writeheader()
             writer.writerows(rows)
+        with csv_path.open(newline="", encoding="utf-8") as fh:
+            grew = sum(1 for _ in csv.reader(fh)) - 1 != raw_count
+        if grew:
+            tmp.unlink(missing_ok=True)
+            log("  CSV is being written by another run -- skipping duplicate cleanup")
+        else:
+            os.replace(tmp, csv_path)
+            log(f"  Removed {raw_count - len(rows)} duplicate rows from the CSV")
 
     by_slug: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
@@ -1292,17 +1619,28 @@ def rebuild(outdir: Path, state: dict | None = None, catalog: dict | None = None
     complete = bool(state.get("list_complete")) and not state.get("pending")
     analysis = build_analysis(rows, catalog, len(failed), complete,
                               reported_total=int(state.get("reported_total_submissions") or 0))
-    save_json(outdir / "analysis_summary.json", analysis)
+
+    # The per-problem detail is ~90% of the analysis and does not fit in one
+    # context alongside anything else. It lives in review/ so it can be read a
+    # bundle at a time; analysis_summary.json stays small enough to read whole.
+    problems = analysis.pop("problems")
+    tag_names = {t.get("slug"): t.get("name")
+                 for entry in catalog.values() for t in (entry.get("topicTags") or [])}
+    write_review_bundles(outdir, problems, analysis["by_topic"], tag_names)
+    analysis["overview"]["review_bundles"] = len(list((outdir / "review").glob("*.json"))) - 1
 
     solutions = outdir / "solutions"
-    code_files = sum(1 for f in solutions.rglob("*")
-                     if f.is_file() and f.name != "attempts_summary.json"
-                     ) if solutions.is_dir() else 0
+    code = [f for f in solutions.rglob("*")
+            if f.is_file() and f.name != "attempts_summary.json"] if solutions.is_dir() else []
+    code_files = len(code)
+    analysis["overview"]["code_bytes"] = sum(f.stat().st_size for f in code)
+    save_json(outdir / "analysis_summary.json", analysis)
     (outdir / "prompt.md").write_text(render_prompt(analysis, code_files), encoding="utf-8")
 
     log(f"  {len(rows)} submissions | {len(by_slug)} problems | "
-        f"{len(analysis['by_topic'])} topics")
-    log(f"  Wrote analysis_summary.json and prompt.md")
+        f"{len(analysis['by_topic'])} topics | "
+        f"{analysis['overview']['review_bundles']} review bundles")
+    log(f"  Wrote analysis_summary.json, review/ and prompt.md")
 
 
 # --------------------------------------------------------------------------
@@ -1417,6 +1755,67 @@ def self_test() -> None:
     assert summary_a["status_breakdown"] == {"Wrong Answer": 1, "Accepted": 1}
     summary_c = summarize_attempts([r for r in rows if r["titleSlug"] == "c"])
     assert not summary_c["solved"] and summary_c["attempts_to_accept"] is None
+
+    # --- attempts after the first Accept are not first-solve effort ---------
+    summary_d = summarize_attempts([r for r in rows if r["titleSlug"] == "d"])
+    assert summary_d["status_breakdown"] == {"Accepted": 1}, summary_d["status_breakdown"]
+    assert summary_d["post_solve_submissions"] == 1
+    assert summary_d["post_solve_status_breakdown"] == {"Wrong Answer": 1}
+    assert summary_d["total_attempts"] == 2, "the raw total still counts everything"
+
+    # --- dive-in pointers: the mistakes, and the code they led to -----------
+    def coded(sid, ts, status, path):
+        return dict(row(sid, ts, "e", status), code_file_path=path)
+
+    pointed = summarize_attempts([
+        coded(10, 1700000000, "Wrong Answer", "solutions/e/wa.py"),
+        coded(11, 1700000600, "Time Limit Exceeded", "solutions/e/tle.py"),
+        coded(12, 1700001200, "Accepted", "solutions/e/ok.py"),
+        coded(13, 1700001800, "Accepted", "solutions/e/later.py"),
+    ])
+    assert pointed["first_accepted_file"] == "solutions/e/ok.py", "must be the FIRST accept"
+    assert pointed["failed_attempt_files"] == ["solutions/e/wa.py", "solutions/e/tle.py"]
+    assert pointed["post_solve_submissions"] == 1
+
+    # --- timing/similarity facts -------------------------------------------
+    annotated = annotate_rows([row(20, 1700000000, "f", "Wrong Answer"),
+                               row(21, 1700000030, "g", "Accepted"),
+                               row(22, 1700000100, "f", "Accepted")])
+    assert annotated[0]["gap_before"] is None and annotated[0]["gap_on_problem"] is None
+    assert annotated[1]["gap_before"] == 30, "gap_before spans problems"
+    assert annotated[2]["gap_before"] == 70 and annotated[2]["gap_on_problem"] == 100
+    assert _jaccard({"a", "b"}, {"a", "b"}) == 1.0
+    assert _jaccard({"a", "b"}, {"c"}) == 0.0
+    assert _jaccard(set(), {"a"}) is None, "an unreadable file must not be a verdict"
+
+    # --- the paste heuristic, and its deliberate blind spots ----------------
+    def att(**kw):
+        return {"status_display": "Accepted", "difficulty": "Medium", **kw}
+
+    assert classify_attempt(att(similarity_to_previous=0.95, gap_on_problem=20),
+                            False) == "resubmission", "same code again = a runtime measurement"
+    assert classify_attempt(att(similarity_to_previous=0.2, gap_on_problem=20),
+                            False) == "pasted", "a full rewrite in 20s was not typed"
+    assert classify_attempt(att(similarity_to_previous=0.85, gap_on_problem=20),
+                            False) == "own", "a small fix is genuine work"
+    assert classify_attempt(att(similarity_to_previous=0.2, gap_on_problem=3600),
+                            False) == "own", "a rewrite after an hour proves nothing"
+    assert classify_attempt(att(gap_before=40), True) == "pasted", \
+        "straight to Accepted on a Medium with no window to solve it"
+    assert classify_attempt(att(gap_before=40, difficulty="Easy"), True) == "own", \
+        "a fast Easy is plausible"
+    assert classify_attempt(att(gap_before=40, status_display="Wrong Answer"),
+                            True) == "own", "a fast failure is not a paste"
+    assert classify_attempt(att(gap_before=9000), True) == "own"
+    assert classify_attempt(att(), True) == "own", "no evidence means no accusation"
+
+    suspect = summarize_attempts([dict(row(30, 1700000000, "h", "Accepted"),
+                                       gap_before=15)])
+    assert suspect["solved"] and suspect["self_solved"] is False
+    assert suspect["suspect_pasted_attempts"] == 1
+    honest = summarize_attempts([dict(row(31, 1700000000, "i", "Accepted"),
+                                      gap_before=9000)])
+    assert honest["self_solved"] is True and honest["max_seconds_before_first_accept"] == 9000
 
     analysis = build_analysis(rows, generated_at=1704067200)
     dp = next(t for t in analysis["by_topic"] if t["topic"] == "dp")

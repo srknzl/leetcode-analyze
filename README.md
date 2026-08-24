@@ -96,28 +96,81 @@ expires after a while; when it does the tool says so and you repeat the copy.
 
 ## Analysing the export
 
-That is what this is for:
+That is what this is for. Point an LLM at the folder and let it read your code:
 
 ```bash
 cd leetcode_export && claude "read prompt.md and do the analysis"
 ```
 
-`prompt.md` is generated on every run with your real numbers in it. It explains
-the schema, warns about the traps, tells the model to start from the
-pre-computed statistics and drill into your actual failed code for the weakest
-topics, and asks for a dated weak/strong breakdown plus a prioritised practice
-plan.
+`prompt.md` is regenerated on every run with your real numbers in it. You do
+not need to explain anything else — it documents the schema, warns about the
+traps, and lays out the job.
 
-The statistics in `analysis_summary.json` are computed by the tool, not by the
-LLM — an LLM asked to average thousands of CSV rows will get some of it wrong
-quietly. The tool supplies the facts; the LLM supplies the diagnosis.
+### It is a big job, done chunk by chunk
+
+The point is not a summary of the statistics. It is that an LLM reads **every
+solution you have ever submitted** — the accepted ones too, since passing code
+still shows your habits — and reports the mistakes you repeat, the smells in
+code that worked, and a portrait of how you write.
+
+That is far more than fits in one context (~1.9M tokens of code here), so the
+export is pre-split into **109 review bundles**, one per topic, each problem in
+exactly one bundle. The model works through them a few at a time.
+
+**Progress is tracked by which files exist.** A bundle is done when
+`findings/<topic>.json` has been written. There is no state file to corrupt and
+nothing to keep in sync.
+
+To carry on in a fresh session:
+
+```bash
+cd leetcode_export && claude "read prompt.md and continue"
+```
+
+It compares `review/` against `findings/`, picks up the next unfinished bundle,
+and keeps going. Repeat until every bundle has findings — then ask it to do the
+reduce step, which reads all the findings files and writes `REPORT.md`: the
+recurring mistakes ranked by frequency, your coding-style profile, weak and
+strong topics with dates, and a prioritised practice plan.
+
+If your LLM has subagents, it will fan several bundles out in parallel, since
+bundles are fully independent.
+
+### What the tool decides, and what the LLM decides
+
+Every rate, median and count in `analysis_summary.json` is computed by the tool.
+An LLM asked to average thousands of CSV rows gets some of it wrong quietly.
+The tool supplies the facts; the LLM reads the code and supplies the diagnosis.
+
+The tool also separates out the submissions that are not you solving a problem,
+because counting them would flatter exactly the topics you are weakest at:
+
+- **Post-solve submissions** — anything sent *after* a problem was already
+  accepted. Re-runs, optimisation, measuring runtime. In this export that is
+  3,011 of 5,212 submissions, and it is kept out of `status_breakdown`
+  entirely. This is structural, not a guess: first-solve effort cannot happen
+  after the problem is already solved.
+- **Suspected pasted code** — editorial or LLM output pasted in and submitted.
+  Flagged by timing and code similarity: a wholesale rewrite between two
+  submissions a minute apart, or a Medium/Hard going straight to Accepted
+  moments after the previous submission, leaving no window to have solved it.
+  A heuristic, deliberately conservative, and `prompt.md` tells the model to
+  discount rather than exclude. Compare `self_solve_rate` against `solve_rate`
+  per topic to see where it matters.
+- **Byte-identical resubmissions** — marked with `same_code_as` so the model
+  skips re-reading the same text. 535 files here.
 
 ## Output
 
 ```
 leetcode_export/                 (gitignored — holds a live login session)
 ├── prompt.md                    the LLM briefing; point Claude at this
-├── analysis_summary.json        overview / by_topic / by_month / problems
+├── analysis_summary.json        overview / by_topic / by_month (small: read whole)
+├── review/                      per-problem detail, split into bundles
+│   ├── <topic>.json             one bundle of problems + every attempt file
+│   └── _index.json              titleSlug -> which bundle holds it
+├── findings/                    written by the LLM; one file per finished bundle
+├── REPORT.md                    written by the LLM at the end
 ├── submissions_all.csv          one row per submission, every status
 ├── problem_catalog.json         titleSlug -> difficulty, topic tags, number
 ├── failed_submissions.json      downloads that failed, for --retry-failed
@@ -135,6 +188,10 @@ Per-topic metrics worth knowing about:
 
 - **`first_attempt_accept_rate`** — solved with zero failed attempts. Real
   mastery, as opposed to grinding it out.
+- **`self_solve_rate`** — the same coverage, with attempts flagged as pasted
+  removed. Where this sits well below `solve_rate`, the topic is weaker than it
+  looks.
+- **`review_files`** — which bundles under `review/` hold this topic's problems.
 - **`median_attempts_to_accept`** — how expensive a solve is on this topic.
 - **`status_breakdown`** — TLE-heavy means wrong complexity; Runtime-Error-heavy
   means edge cases and bounds; Wrong-Answer-heavy means logic.
