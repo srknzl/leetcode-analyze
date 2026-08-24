@@ -1596,13 +1596,12 @@ def write_review_bundles(outdir: Path, problems: list[dict], by_topic: list[dict
     its problems. Returns the index."""
     review = outdir / "review"
     review.mkdir(parents=True, exist_ok=True)
-    for stale in review.glob("*.json"):
-        stale.unlink()          # derived data, rebuilt in full every time
 
     buckets = review_buckets(problems)
-    index, files_for_tag = {}, defaultdict(set)
+    index, files_for_tag, written = {}, defaultdict(set), set()
     for topic, entries in buckets.items():
         name = f"{safe_component(topic)}.json"
+        written.add(name)
         failing = [p for p in entries if p["failed_attempt_files"]]
         save_json(review / name, {
             "topic": topic,
@@ -1621,6 +1620,13 @@ def write_review_bundles(outdir: Path, problems: list[dict], by_topic: list[dict
     for topic in by_topic:
         topic["review_files"] = sorted(files_for_tag.get(topic["topic"], []))
     save_json(review / "_index.json", index)
+
+    # Prune only afterwards. Every bundle is rewritten in place via save_json's
+    # atomic replace, so an analysis session part-way down the list never sees a
+    # bundle briefly missing.
+    for stale in review.glob("*.json"):
+        if stale.name not in written and stale.name != "_index.json":
+            stale.unlink()
     return index
 
 
