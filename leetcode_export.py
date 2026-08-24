@@ -1281,7 +1281,8 @@ say nothing about how I think.
 Some submissions are not my own problem solving. They are editorial or
 LLM-generated code, pasted in and submitted -- often just to see the runtime.
 Counting those as solves would overstate my ability on exactly the topics I am
-weakest at, so the data separates them two ways.
+weakest at, so they are separated three ways: two the tool computes, and one
+that is yours to make while you read.
 
 **Structural, and certain:** anything submitted *after* a problem was first
 Accepted is a revisit, not first-solve effort. It is counted in
@@ -1297,6 +1298,43 @@ Treat the heuristic as a reason to *discount*, never as proof. It cannot see
 pasted code submitted after a long pause, and it will occasionally flag a
 genuine fast solve. When a topic's `self_solve_rate` sits well below its
 `solve_rate`, say so and lean on the lower number -- but say which one you used.
+
+**Stylistic, and yours to judge.** The two signals above are both blind to the
+commonest case: I open a problem, think for twenty minutes, give up, and paste
+the editorial. Long gap, no earlier attempt to compare against, so nothing
+mechanical fires. Only the code shows it -- so while you are reading, judge it.
+
+Do it as a **comparison against my own code, never as generic AI-detection**.
+"This does not look like the other forty solutions this person wrote" is a claim
+you can support. "This looks AI-generated" is not -- that judgement is
+unreliable in the absolute, and you would be guessing. You have my whole corpus;
+use it as the baseline. What earns a flag is *discontinuity*: idioms, naming,
+comment style, error handling or a level of sophistication that appears here and
+nowhere else in my work on this topic.
+
+Five rules, because the errors here are asymmetric -- telling me I did not solve
+something I did solve is worse than missing a paste:
+
+1. **Only adjudicate where it changes something.** A problem with six Wrong
+   Answers before the Accept is obviously mine. Judge the clean or near-clean
+   Accepts on Medium and Hard; skip the rest.
+2. **Never exclude anything on your own judgement.** Annotate it and lower your
+   confidence in the conclusions that rest on it. Exclusion is reserved for
+   `post_solve`, which is certain.
+3. **Always give the reason, concretely.** "Uses `functools.cache` and type
+   hints; neither appears anywhere else in this bundle" is evidence. "Feels
+   generated" is not, and should not be written down.
+4. **Judge before you conclude.** Form the provenance view while reading the
+   code, not after you have decided which topics are weak -- otherwise you will
+   find pasted code exactly where your thesis needs it.
+5. **Allow for me changing.** The export spans years and more than one language.
+   Learning an idiom looks exactly like a different author. If a "new" style
+   then recurs in later problems, it was me learning something; if it appears
+   once and never again, that is the suspicious shape.
+
+Where you cannot tell, say so. `uncertain` is a genuinely useful answer here and
+a confident wrong one is not. And note the limit of the whole exercise: whether
+I *understood* code I typed myself is not visible in the artefact at all.
 
 ### `problem_catalog.json`
 
@@ -1371,6 +1409,9 @@ session can pick up where the last one stopped.
                    "how_it_was_fixed": "changed hi = n-1 to hi = n"}],
      "smells_in_accepted_code": [{"problem": "<slug>", "file": "<path>",
                                   "smell": "O(n^2) scan where a prefix sum was enough"}],
+     "provenance": [{"problem": "<slug>", "file": "<path>",
+                     "verdict": "mine | uncertain | discontinuous",
+                     "why": "uses functools.cache and type hints; neither appears anywhere else in this bundle"}],
      "style_notes": ["reaches for dict-of-lists before defaultdict",
                      "names loop variables i/j/k even in nested logic",
                      "writes the recursion first, converts to iterative only after TLE"],
@@ -1381,6 +1422,10 @@ session can pick up where the last one stopped.
 
    Be specific. "Off-by-one in the binary-search upper bound" is worth
    something; "logic error" is not.
+
+   `provenance` only needs entries for clean or near-clean Accepts on Medium and
+   Hard, per rule 1 in section 2b. Most problems will not need one at all, and
+   `mine` is the correct verdict for the overwhelming majority.
 
    `style_notes` is about **how I write**, not whether it passed: naming,
    structure, which constructs I reach for, whether I comment, how I handle
@@ -1414,6 +1459,13 @@ mode. The status breakdown tells you which:
 - **Entries in `unsolved_problems`** -> I never got there at all
 
 ### Strong areas
+**Provenance, stated once and honestly.** How many problems you marked
+`discontinuous` or `uncertain`, and what that does to the rest of the report.
+If it is a small number, say the analysis stands. If a weak topic's evidence
+turns out to rest largely on code you doubt is mine, that is the single most
+important thing in the report -- say it first, because it means the real
+weakness is worse than the statistics show.
+
 **How I write code.** A characterisation drawn from the whole corpus, not one
 sample: the constructs I reach for, how I name and structure things, my default
 approach to a new problem, what I do when the first attempt fails, and how my

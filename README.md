@@ -160,6 +160,16 @@ because counting them would flatter exactly the topics you are weakest at:
 - **Byte-identical resubmissions** — marked with `same_code_as` so the model
   skips re-reading the same text. 535 files here.
 
+There is a third signal the tool cannot compute: code that was pasted after a
+long pause. No timing or similarity check can see it — only the code can. So
+`prompt.md` asks the LLM to judge that while it reads, under tight rules: it
+compares against *your own* corpus rather than doing generic AI-detection,
+only adjudicates clean Accepts on Medium and Hard where the answer changes
+something, must give a concrete reason, and may never exclude anything on its
+own judgement — it annotates and lowers confidence instead. `uncertain` is an
+allowed verdict, and telling you that you didn't solve something you did is
+treated as the worse error.
+
 ## Output
 
 ```
