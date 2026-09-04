@@ -341,6 +341,11 @@ def page(title: str, body: str, depth_note: str = "",
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- This book quotes the reader's own submission history in full. It is
+     published so it can be linked, not so it can be found: kept out of search
+     engines here as well as in the site's robots.txt, because a robots rule
+     alone does not stop a page that is linked from elsewhere being indexed. -->
+<meta name="robots" content="noindex, nofollow">
 <title>{esc(title)}</title>
 <link rel="stylesheet" href="book.css">
 </head>
