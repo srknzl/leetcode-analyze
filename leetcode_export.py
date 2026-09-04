@@ -920,16 +920,24 @@ REWRITE_SIMILARITY = 0.5      # below this, consecutive attempts are a rewrite, 
 BENCHMARK_SIMILARITY = 0.9    # above this, it is the same code submitted again
 
 
-def _line_set(outdir: Path | None, rel_path: str) -> set[str] | None:
-    """Non-blank, stripped lines of one solution file. Cheap stand-in for a
-    real diff: order and whitespace churn do not matter here, content does."""
+def _read_solution(outdir: Path | None, rel_path: str) -> tuple[set[str] | None, str | None]:
+    """One solution file, as (line set, content hash).
+
+    The line set is a cheap stand-in for a real diff -- order and whitespace
+    churn do not matter for *similarity*, content does. The hash is over the
+    raw text, because it answers a different question: `same_code_as` tells the
+    reader a file is safe to skip unread, so it must mean genuinely identical.
+    Hashing the line set instead marked reordered code -- including Wrong
+    Answer/Accepted pairs -- as duplicates and hid the very diff worth reading.
+    """
     if not outdir or not rel_path:
-        return None
+        return None, None
     try:
         text = (outdir / rel_path).read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return None
-    return {ln.strip() for ln in text.splitlines() if ln.strip()} or None
+        return None, None
+    lines = {ln.strip() for ln in text.splitlines() if ln.strip()}
+    return lines or None, hashlib.md5(text.encode()).hexdigest()[:12]
 
 
 def _jaccard(a: set[str] | None, b: set[str] | None) -> float | None:
@@ -952,14 +960,13 @@ def annotate_rows(rows: list[dict], outdir: Path | None = None) -> list[dict]:
 
     for row in ordered:
         ts, slug = row["timestamp"], row.get("titleSlug", "")
-        lines = _line_set(outdir, row.get("code_file_path", ""))
+        lines, digest = _read_solution(outdir, row.get("code_file_path", ""))
         last = prev_on_problem.get(slug)
 
         row["gap_before"] = None if prev_ts is None else ts - prev_ts
         row["gap_on_problem"] = None if last is None else ts - last[0]
         row["similarity_to_previous"] = _jaccard(lines, last[1]) if last else None
-        row["code_hash"] = (hashlib.md5("\n".join(sorted(lines)).encode()).hexdigest()[:12]
-                            if lines else None)
+        row["code_hash"] = digest
 
         prev_ts, prev_on_problem[slug] = ts, (ts, lines)
     return ordered
@@ -991,7 +998,6 @@ def summarize_attempts(problem_rows: list[dict], catalog: dict | None = None) ->
     rows = sorted(problem_rows, key=lambda r: r["timestamp"])
     first, last = rows[0], rows[-1]
     slug = first.get("titleSlug", "")
-    statuses = Counter(r.get("status_display") or "Unknown" for r in rows)
 
     accepted_at = next((i for i, r in enumerate(rows)
                         if r.get("status_display") == "Accepted"), None)
@@ -1845,6 +1851,22 @@ def self_test() -> None:
     assert _jaccard({"a", "b"}, {"a", "b"}) == 1.0
     assert _jaccard({"a", "b"}, {"c"}) == 0.0
     assert _jaccard(set(), {"a"}) is None, "an unreadable file must not be a verdict"
+
+    # Regression: `same_code_as` means "skip this file, you have read it".
+    # Hashing a *set* of lines made reordered code -- including Wrong Answer /
+    # Accepted pairs -- collide, so the analysis was told to skip the one diff
+    # worth reading. The hash must be over the content, not the line set.
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "s").mkdir()
+        (root / "s" / "wa.py").write_text("if a > b:\n    return a\nreturn b\n")
+        (root / "s" / "ok.py").write_text("return b\nif a > b:\n    return a\n")
+        lines_wa, hash_wa = _read_solution(root, "s/wa.py")
+        lines_ok, hash_ok = _read_solution(root, "s/ok.py")
+        assert lines_wa == lines_ok, "reordering does not change the line set"
+        assert hash_wa != hash_ok, "reordered code is NOT the same file"
+        assert _read_solution(root, "s/missing.py") == (None, None)
 
     # --- the paste heuristic, and its deliberate blind spots ----------------
     def att(**kw):
