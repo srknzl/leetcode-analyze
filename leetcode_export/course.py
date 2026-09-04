@@ -52,6 +52,68 @@ def code(java: str, compiles: bool = True) -> str:
     return f'<pre class="{kind}"><code>{escape(java.strip())}</code></pre>'
 
 
+# The two halves of a repro sit in columns about half the page wide, so every
+# character over this is a character of horizontal scroll -- and a diff you have
+# to scroll sideways is not a diff you can read. build_book.py asserts it.
+REPRO_COLUMNS = 64
+
+
+def align_comments(java: str, budget: int = REPRO_COLUMNS) -> str:
+    """Lay out trailing `//` comments in whatever way fits the column.
+
+    Aligned to the right of the code when the whole block fits the budget, and
+    lifted onto their own line above the code they annotate when it does not.
+    Doing it here rather than in the source means the samples can be written
+    with the comment wherever it fell, and the block still comes out square in
+    a column half the width of the page.
+    """
+    rows = []
+    for line in java.splitlines():
+        at = line.find("//")
+        rows.append((line[:at].rstrip(), line[at:]) if at > 0
+                    and line[:at].strip() else (line, ""))
+    commented = [(code, note) for code, note in rows if note]
+    if not commented:
+        return "\n".join(code for code, _ in rows)
+
+    column = max(len(code) for code, _ in commented) + 1
+    if column + max(len(note) for _, note in commented) <= budget:
+        return "\n".join(f"{code.ljust(column)}{note}" if note else code
+                         for code, note in rows)
+
+    out = []
+    for code, note in rows:
+        if note:
+            out.append(" " * (len(code) - len(code.lstrip())) + note)
+        out.append(code)
+    return "\n".join(out)
+
+
+def wrong_right(bad: str, good: str, note: str, bad_compiles: bool = True) -> str:
+    """The bug and the fix, in the same shape, side by side.
+
+    Every other code block in this book shows the correct form, and the prose
+    beside it says what the wrong one looked like. That asks the reader to hold
+    the bug in their head while reading the fix. Putting the two next to each
+    other is the whole point of a minimal repro: the difference is the lesson,
+    and it should be visible without a sentence explaining it.
+
+    Both halves go through javac like any other block. `bad_compiles=False` is
+    for the one lesson whose bug *is* a compile error -- there, a block javac
+    accepts would be the wrong example.
+    """
+    from html import escape
+    marks = "lesson-code bad" + ("" if bad_compiles else " illustrative")
+    left, right = (escape(align_comments(part.strip())) for part in (bad, good))
+    return (f'<div class="repro">'
+            f'<figure><figcaption>What you wrote</figcaption>'
+            f'<pre class="{marks}"><code>{left}</code></pre></figure>'
+            f'<figure><figcaption>What it should be</figcaption>'
+            f'<pre class="lesson-code good"><code>{right}</code>'
+            f'</pre></figure></div>'
+            f'<p class="repro-note">{note}</p>')
+
+
 def ul(*items: str) -> str:
     return "<ul>" + "".join(f"<li>{i}</li>" for i in items) + "</ul>"
 
@@ -6610,6 +6672,399 @@ for _lesson in LESSONS:
  _lesson["basics"] = [p for p in _lesson["basics"] if not _belongs(p[0])]
  assert _lesson["basics"], f"{_lesson['slug']}: the split emptied the lesson"
  _lesson["reference"] = {"title": _title, "blurb": _blurb, "sections": _moved}
+
+
+# ===================== the minimal repro per lesson ==========================
+# One bug and its fix, side by side, for every lesson. Kept together rather
+# than inside each lesson literal for the same reason LESSON_EXTRAS is: thirty-
+# one of the same thing, read in one place, is the only way to see whether they
+# are actually thirty-one *different* bugs. Each one is the shape that recurs
+# in findings/ for that lesson, cut down to the smallest code that still has it.
+# build_book.py puts both halves through javac and asserts every lesson has one.
+# --------------------------------------------------------------------------
+
+REPROS = {
+
+"complexity-budget": wrong_right("""
+// n queries over n values, n <= 1e5: 1e10 operations.
+for (int j = 0; j < n; j++) {
+    int sum = 0;
+    for (int i = 0; i <= j; i++) sum += nums[i];   // rescanned every query
+    best = Math.max(best, sum);
+}
+""", """
+int[] prefix = new int[n + 1];
+for (int i = 0; i < n; i++) prefix[i + 1] = prefix[i] + nums[i];
+for (int j = 0; j < n; j++)
+    best = Math.max(best, prefix[j + 1]);
+""", "Neither version is cleverer than the other. The left one is O(n&sup2;) and "
+     "the right one is O(n), and the constraint line told you which you were "
+     "allowed before either was written."),
+
+"integer-width": wrong_right("""
+long total = x * y;              // multiplied as int, wrapped, then widened
+int mid = (lo + hi) / 2;         // lo + hi overflows before the divide
+""", """
+long total = (long) x * y;       // widened before the multiply
+int mid = lo + (hi - lo) / 2;    // no sum, nothing to overflow
+""", "The destination type never changes how the arithmetic is done. Widen the "
+     "first operand, not the assignment."),
+
+"sentinels": wrong_right("""
+int max = 0;                                  // 0 is not the identity for max
+for (int v : nums) max = Math.max(max, v);
+return max;                                   // returns 0 when every value is negative
+""", """
+int max = Integer.MIN_VALUE;                  // the identity of max
+for (int v : nums) max = Math.max(max, v);
+return max;
+""", "The starting value is a claim about what the operation returns on an empty "
+     "set. Take it from the operation, not from habit."),
+
+"bounds": wrong_right("""
+if (nums[i] == target && i < n) return i;      // reads, then checks the range
+return -1;
+""", """
+if (i < n && nums[i] == target) return i;      // range first, read second
+return -1;
+""", "<code>&amp;&amp;</code> is ordered, and that ordering is the guard. Reversing "
+     "the two halves turns a correct check into an out-of-bounds read."),
+
+"degenerate-inputs": wrong_right("""
+int best = nums[0];   // throws on an empty array
+for (int i = 1; i < n; i++) best = Math.max(best, nums[i]);
+return best;
+""", """
+// n = 0, stated before the loop that assumes otherwise exists
+if (n == 0) return 0;
+int best = nums[0];
+for (int i = 1; i < n; i++) best = Math.max(best, nums[i]);
+return best;
+""", "The algorithm was never wrong. It had just never been shown an input with "
+     "nothing in it."),
+
+"case-analysis": wrong_right("""
+if (a[i] > b[j]) i++;
+else if (a[i] < b[j]) j++;                     // equal: neither advances, the loop hangs
+""", """
+if (a[i] > b[j]) i++;
+else if (a[i] < b[j]) j++;
+else { i++; j++; }                             // the third case, written down
+""", "Two branches over three orderings. The missing case is not a rare input &mdash; "
+     "for two sorted arrays it is the common one."),
+
+"last-group": wrong_right("""
+for (int i = 1; i < n; i++) {
+    if (nums[i] != nums[i - 1]) { list.add(count); count = 0; }
+    count++;
+}
+return list;                                   // the final run is never added
+""", """
+for (int i = 1; i < n; i++) {
+    if (nums[i] != nums[i - 1]) { list.add(count); count = 0; }
+    count++;
+}
+list.add(count);                               // the tail closes the last group
+return list;
+""", "The write is triggered by seeing the <em>next</em> group. Nothing comes after "
+     "the last one, so nothing triggers its write."),
+
+"binary-search": wrong_right("""
+while (lo <= hi) {
+    int mid = (lo + hi) / 2;
+    if (nums[mid] < target) lo = mid;          // lo never moves once hi == lo + 1
+    else hi = mid - 1;
+}
+""", """
+while (lo < hi) {                              // half-open [lo, hi)
+    int mid = lo + (hi - lo) / 2;
+    if (nums[mid] < target) lo = mid + 1;
+    else hi = mid;
+}
+// invariant: everything below lo fails the predicate,
+// everything at or above hi passes it
+""", "Pick half-open and the three boundary decisions &mdash; the comparison, the two "
+     "assignments &mdash; stop being independent guesses and follow from the invariant."),
+
+"comparators": wrong_right("""
+int[][] pairs = new int[8][2];
+Arrays.sort(pairs, (p, r) -> p[0] - r[0]);            // wraps when the difference exceeds int
+""", """
+int[][] pairs = new int[8][2];
+Arrays.sort(pairs, (p, r) -> Integer.compare(p[0], r[0]));
+""", "Subtraction returns the sign of a number that may have overflowed. "
+     "<code>Integer.compare</code> returns the sign of the comparison."),
+
+"heaps": wrong_right("""
+PriorityQueue<Integer> pq =
+        new PriorityQueue<>(Comparator.reverseOrder());
+for (int v : nums) {
+    pq.offer(v);
+    if (pq.size() > k) pq.poll();
+}
+return pq.peek();   // a max-heap evicts the largest
+""", """
+// a min-heap, so the root is the one you can afford to lose
+PriorityQueue<Integer> pq = new PriorityQueue<>();
+for (int v : nums) {
+    pq.offer(v);
+    if (pq.size() > k) pq.poll();
+}
+return pq.peek();   // the k-th largest
+""", "A bounded heap evicts through its root, so the root has to be the element "
+     "you are willing to lose. For the k largest that is the smallest."),
+
+"equality-hashing": wrong_right("""
+Integer a = map.get(x), b = map.get(y);
+if (a == b) count++;                           // identity, outside -128..127
+""", """
+Integer a = map.get(x), b = map.get(y);
+if (Objects.equals(a, b)) count++;             // value equality, and null-safe
+""", "Small values are cached and compare equal by identity, so this passes every "
+     "test you write by hand and fails on the judge's larger input."),
+
+"library-edges": wrong_right("""
+long mask = (long) (1 << 40);                  // the shift happens in int: this is 256
+""", """
+long mask = 1L << 40;                          // the literal is long before the shift
+""", "The cast converts the result. It does not change the type the expression was "
+     "evaluated in &mdash; by then the bits are gone."),
+
+"counting-arrays": wrong_right("""
+int[] freq = new int[26];                      // sized by habit, not by the range
+for (int v : nums) freq[v]++;                  // any value >= 26 throws
+""", """
+int max = 0;
+for (int v : nums) max = Math.max(max, v);
+int[] freq = new int[max + 1];                 // sized from the data
+for (int v : nums) freq[v]++;
+""", "A counting array is indexed by value, so its length is a statement about the "
+     "value range. Read that range off the constraints or off the data."),
+
+"union-find": wrong_right("""
+int[] parent = new int[8];
+int find(int v) {
+    return parent[v] == v ? v : (parent[v] = find(parent[v]));
+}
+void union(int x, int y) {
+    int rx = find(x), ry = find(y);
+    if (rx != ry) parent[x] = ry;   // links the node, not its root
+}
+""", """
+int[] parent = new int[8];
+int find(int v) {
+    return parent[v] == v ? v : (parent[v] = find(parent[v]));
+}
+void union(int x, int y) {
+    int rx = find(x), ry = find(y);
+    if (rx != ry) parent[rx] = ry;   // roots only
+}
+""", "After the two <code>find</code> calls, <code>x</code> and <code>y</code> must "
+     "not appear again. Every later mention of them is this bug."),
+
+"graph-traversal": wrong_right("""
+while (!queue.isEmpty()) {
+    int v = queue.poll();
+    visited[v] = true;                         // marked on pop
+    for (int w : adj.get(v)) if (!visited[w]) queue.add(w);
+}
+""", """
+visited[start] = true;
+while (!queue.isEmpty()) {
+    int v = queue.poll();
+    for (int w : adj.get(v))
+        if (!visited[w]) { visited[w] = true; queue.add(w); }   // marked on push
+}
+""", "Marking on pop lets a node be queued once per incoming edge, so the queue "
+     "grows with edges rather than nodes and the first arrival stops being the "
+     "shortest one."),
+
+"range-structures": wrong_right("""
+int[] tree = new int[n + 1];
+tree[i] = val;                                 // assigned straight into the backing store
+""", """
+int[] tree = new int[n + 1];
+for (int j = i + 1; j <= n; j += j & -j) tree[j] += val;   // in through add(), always
+""", "<code>tree[i]</code> is not element <em>i</em>. It is a partial sum over a range "
+     "whose width is <code>i &amp; -i</code>, and only <code>add()</code> knows that."),
+
+"windows": wrong_right("""
+sum += nums[hi];
+if (sum > target) { sum -= nums[lo]; lo++; }   // one shrink per step is not enough
+""", """
+sum += nums[hi];
+while (sum > target) { sum -= nums[lo]; lo++; } // shrink until the invariant holds again
+""", "One element entering can invalidate the window by more than one element. The "
+     "invariant is restored by a loop, never by a single step."),
+
+"recursion": wrong_right("""
+List<Integer> path = new ArrayList<>();
+void dfs(int v) {
+    if (v == 8) return;
+    path.add(v);
+    dfs(v + 1);                                // path is never popped
+}
+""", """
+List<Integer> path = new ArrayList<>();
+void dfs(int v) {
+    if (v == 8) return;
+    path.add(v);
+    dfs(v + 1);
+    path.remove(path.size() - 1);              // every mutation undone on the way out
+}
+""", "Shared mutable state and recursion only compose if each frame leaves the state "
+     "exactly as it found it."),
+
+"dynamic-programming": wrong_right("""
+for (int i = 0; i < n; i++)
+    for (int w = nums[i]; w <= k; w++)                 // ascending: the item is reused
+        dp[w] = Math.max(dp[w], dp[w - nums[i]] + nums[i]);
+""", """
+for (int i = 0; i < n; i++)
+    for (int w = k; w >= nums[i]; w--)                 // descending: each item once
+        dp[w] = Math.max(dp[w], dp[w - nums[i]] + nums[i]);
+""", "The two loops differ only in direction, and that direction is the difference "
+     "between 0/1 knapsack and the unbounded one. The dependency order decides it."),
+
+"monotonic-stack": wrong_right("""
+for (int i = 0; i < n; i++) {
+    if (!st.isEmpty() && temps[st.peek()] < temps[i])  // resolves one, leaves the rest
+        dist[st.pop()] = i;
+    st.push(i);
+}
+""", """
+for (int i = 0; i < n; i++) {
+    while (!st.isEmpty() && temps[st.peek()] < temps[i])   // drain everything resolved
+        dist[st.pop()] = i;
+    st.push(i);
+}
+""", "One new element can answer any number of pending ones. The invariant &mdash; the "
+     "stack holds only indices still waiting &mdash; is what makes it a <code>while</code>."),
+
+"strings": wrong_right("""
+String out = "";
+for (int i = 0; i < n; i++) out += s.charAt(i);    // a new String every step: O(n^2)
+""", """
+StringBuilder out = new StringBuilder();
+for (int i = 0; i < n; i++) out.append(s.charAt(i));
+""", "Java strings are immutable, so <code>+=</code> copies everything written so far "
+     "on every pass. The loop looks linear and is not."),
+
+"number-theory": wrong_right("""
+int gcd(int p, int q) { return q == 0 ? p : gcd(q, p % q); }
+long lcm(int x, int y) { return (long) x * y / gcd(x, y); }    // multiplies first
+""", """
+int gcd(int p, int q) { return q == 0 ? p : gcd(q, p % q); }
+long lcm(int x, int y) { return (long) (x / gcd(x, y)) * y; }  // divide before multiply
+""", "The product is exact in <code>long</code> here, but the same line in "
+     "<code>int</code> is one of the overflow bugs in your export. Dividing first "
+     "never needs the wider type."),
+
+"intervals": wrong_right("""
+if (iv[i][0] <= end) end = iv[i][1];               // assumes the next one ends later
+""", """
+if (iv[i][0] <= end) end = Math.max(end, iv[i][1]);   // an interval inside must not shrink it
+""", "Sorting by start says nothing about the ends. An interval wholly contained in "
+     "the current one is the case this drops."),
+
+"linked-list": wrong_right("""
+while (head != null && head.val == val) head = head.next;   // the front, handled twice
+ListNode cur = head;
+while (cur != null && cur.next != null) {
+    if (cur.next.val == val) cur.next = cur.next.next;
+    else cur = cur.next;
+}
+return head;
+""", """
+ListNode dummy = new ListNode(0, head);        // the front stops being a special case
+ListNode cur = dummy;
+while (cur.next != null) {
+    if (cur.next.val == val) cur.next = cur.next.next;
+    else cur = cur.next;
+}
+return dummy.next;
+""", "The dummy exists so that every node in the list has a predecessor. Then one "
+     "loop handles all of them."),
+
+"mutable-state": wrong_right("""
+for (int i = 0; i < list.size(); i++)
+    if (list.get(i) == 0) list.remove(i);      // removing shifts the next element past i
+""", """
+for (int i = list.size() - 1; i >= 0; i--)
+    if (list.get(i) == 0) list.remove(i);      // iterate backwards: no index moves under you
+""", "The index was correct when the line was written. The container moved before the "
+     "next pass read it."),
+
+"wrong-name": wrong_right("""
+for (int i = 0; i < rows.length; i++)
+    for (int j = 0; j < cols.length; j++)
+        grid[i][j] = rows[i] + cols[i];        // `cols[i]` -- meant `cols[j]`
+""", """
+for (int r = 0; r < rows.length; r++)
+    for (int c = 0; c < cols.length; c++)
+        grid[r][c] = rows[r] + cols[c];        // each index named for what it ranges over
+""", "It compiles, it runs, and it reads a real element every time. Naming the indices "
+     "after what they range over is what makes the wrong one look wrong."),
+
+"edit-hygiene": wrong_right("""
+int[] freq = new int[26];
+for (char ch : s.toCharArray()) freq[ch - 'a']++
+return freq;
+""", """
+int[] freq = new int[26];
+for (char ch : s.toCharArray()) freq[ch - 'a']++;
+return freq;
+""", "One semicolon. This is the entire difference between an attempt and a wasted "
+     "one, 242 times in your export &mdash; and <code>javac</code> finds it in a second.",
+ bad_compiles=False),
+
+"post-solve-regression": wrong_right("""
+// Accepted with `<= n`. The tidy-up made it `< n`, dropped
+// the last cell, and nothing re-ran the passing tests.
+for (int i = 1; i < n; i++) best = Math.max(best, dp[i]);
+""", """
+// Keep the accepted version open. Diff before resubmitting.
+for (int i = 1; i <= n; i++) best = Math.max(best, dp[i]);
+""", "The bug is not in either line. It is in rewriting an accepted solution without "
+     "keeping the accepted one as the oracle."),
+
+"derive-dont-guess": wrong_right("""
+boolean[] canDo = new boolean[20001];          // "big enough" -- retuned four times
+""", """
+int sum = 0;
+for (int v : nums) sum += v;
+boolean[] canDo = new boolean[sum / 2 + 1];    // the size is the target, derived
+""", "This is your own <code>partition-equal-subset-sum</code>: 20000, then 10001, then "
+     "20001, then 10001 again. Every constant needs a one-phrase meaning."),
+
+"read-the-statement": wrong_right("""
+int best = 0;
+for (int i = 0; i < n; i++) if (nums[i] > nums[best]) best = i;
+return nums[best];                             // the statement asked for the index
+""", """
+int best = 0;
+for (int i = 0; i < n; i++) if (nums[i] > nums[best]) best = i;
+return best;
+""", "Correct algorithm, correct code, wrong question. The judge only ever tells you "
+     "the last part, and it tells you as Wrong Answer."),
+
+"loop-bounds": wrong_right("""
+if (i < 0 || i > n) return -1;                 // `> n` lets i == n through
+for (int j = 0; j <= n; j++) sum += nums[j];   // and `<=` runs one past the end
+return sum;
+""", """
+if (i < 0 || i >= n) return -1;
+for (int j = 0; j < n; j++) sum += nums[j];    // half-open by default
+return sum;
+""", "Two characters, two out-of-bounds reads. Half-open is the default because it "
+     "makes <code>&lt;=</code> a claim you have to defend."),
+
+}
+
+assert set(REPROS) == {l["slug"] for l in LESSONS}, (
+    set(REPROS) ^ {l["slug"] for l in LESSONS})
+for _lesson in LESSONS:
+ _lesson["repro"] = REPROS[_lesson["slug"]]
 
 
 # ===================== the glossary ==========================================

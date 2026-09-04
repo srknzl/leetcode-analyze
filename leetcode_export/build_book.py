@@ -19,7 +19,7 @@ import html
 import json
 import math
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import course
@@ -127,6 +127,17 @@ def plural(count, noun: str, suffix: str = "s") -> str:
 # Model
 # --------------------------------------------------------------------------
 
+def mistake_time(mistake: dict) -> int:
+    """When the submission a diagnosis cites was made, in epoch seconds.
+
+    Filenames lead with the timestamp, so this is the only date the export
+    carries down to the individual mistake. 0 means the citation names no
+    usable file -- callers skip those rather than dating them to 1970.
+    """
+    head = Path(mistake.get("file") or "").stem.split("_", 1)[0]
+    return int(head) if head.isdigit() else 0
+
+
 class Case:
     """One problem inside a topic, with every mistake logged against it."""
 
@@ -157,11 +168,7 @@ class Case:
 
     def order_mistakes(self) -> list[dict]:
         """Chronological -- the debugging story only reads correctly in order."""
-        def timestamp(mistake):
-            stem = Path(mistake.get("file") or "").stem
-            head = stem.split("_", 1)[0]
-            return int(head) if head.isdigit() else 0
-        return sorted(self.mistakes, key=timestamp)
+        return sorted(self.mistakes, key=mistake_time)
 
 
 class Chapter:
@@ -1036,8 +1043,13 @@ def anchor(text: str, index: int) -> str:
 # The reading order the pages promise: what it is, when you reach for it, how a
 # question announces itself, the mechanism, the bugs you actually shipped, the
 # corrections. Each entry is (id, nav label, heading).
+# The repro section is named in three places -- the table of contents, the
+# heading, and the section list the checks read -- so it is named once here.
+REPRO_HEADING = "The bug, in miniature"
+
 LESSON_SECTIONS = [
     ("summary", "Summary", "In one page"),
+    ("repro", "The bug", REPRO_HEADING),
     ("uses", "What it&rsquo;s for", "What it&rsquo;s used for"),
     ("patterns", "Question patterns", "How the questions are phrased"),
     ("depth", "In depth", "The mechanism, in depth"),
@@ -1122,14 +1134,24 @@ it tells you which part of the page below is the part you need.</p>
 
 def render_lesson(lesson: dict, evidence: list[tuple], rank: int, total: int,
                   prev_l: dict | None, next_l: dict | None,
-                  habits: list[tuple] = (), drills: int = 0) -> str:
+                  habits: list[tuple] = (), drills: int = 0,
+                  tier: tuple[str, str] = ()) -> str:
     topics = sorted({chapter.name for chapter, _, _ in evidence})
 
     # --- 1. summary -------------------------------------------------------
     stat = (f'<p class="stat-line">{plural(len(evidence), "mistake")} in your own '
             f'submissions, across {plural(len(topics), "topic")}.</p>'
+            f"{render_lesson_history(evidence)}"
             if evidence else "")
     summary = lesson.get("summary") or f"<p>{esc_code(lesson['one_line'])}</p>"
+
+    # --- 1b. the bug and the fix, side by side ----------------------------
+    repro_html = (f'<section class="lesson-sec" id="repro">'
+                  f"<h2>{REPRO_HEADING}</h2>"
+                  f'<p class="hint">The shape this lesson is about, cut down to the '
+                  f"smallest code that still has the bug. Everything below is the "
+                  f"same difference, at full size, in your own submissions.</p>"
+                  f'{lesson["repro"]}</section>')
 
     # --- 2. what it is used for -------------------------------------------
     uses = lesson.get("used_for") or []
@@ -1243,9 +1265,12 @@ where it does not.</p>
     toc = "".join(f'<a href="#{i}">{label}</a>' for i, label, _ in LESSON_SECTIONS
                   if present.get(i, True))
 
+    tier_note = (f' &middot; <a href="course.html">tier {esc(tier[0])}</a>, '
+                 f"{esc(tier[1].lower())}" if tier else "")
+
     body = f"""<nav class="crumb">{navbar}</nav>
 <header class="chapter-head lesson-head">
-<p class="eyebrow">Lesson {rank} of {total}</p>
+<p class="eyebrow">Lesson {rank} of {total}{tier_note}</p>
 <h1>{esc(lesson['title'])}</h1>
 <p class="lede">{esc_code(lesson['one_line'])}</p>
 {render_objectives(lesson)}
@@ -1256,6 +1281,7 @@ where it does not.</p>
 {summary}{stat}
 <h3>Why this lesson is in your course</h3>
 <p>{esc_code(lesson['why'])}</p></section>
+{repro_html}
 {uses_html}
 {patterns_html}
 {depth_html}
@@ -2385,7 +2411,7 @@ of both of these.</p>
 # file, a class body, a method body. Which one a block is is not worth guessing
 # at -- javac decides, in that order, and a block that fails all three either
 # is an illustration and says so, or is a bug in the book.
-LESSON_CODE = re.compile(r'<pre class="lesson-code( illustrative)?"><code>(.*?)</code></pre>',
+LESSON_CODE = re.compile(r'<pre class="lesson-code([^"]*)"><code>(.*?)</code></pre>',
                          re.S)
 # Each block is compiled in its own file under its own class name -- several
 # files declaring the same class in one javac invocation is a duplicate-class
@@ -2417,7 +2443,8 @@ def lesson_sections(lesson: dict) -> list[tuple[str, str]]:
     page. Checks read this, not `basics`, so a split never hides prose or code.
     """
     reference = lesson.get("reference")
-    return ([("In one page", lesson.get("summary") or "")] + lesson["basics"]
+    return ([("In one page", lesson.get("summary") or ""),
+             (REPRO_HEADING, lesson.get("repro") or "")] + lesson["basics"]
             + (reference["sections"] if reference else []))
 
 
@@ -2427,7 +2454,7 @@ def java_blocks(lessons: list[dict]) -> tuple[list[tuple], int]:
     for lesson in lessons:
         for heading, body in lesson_sections(lesson):
             for marked, source in LESSON_CODE.findall(body):
-                if marked:
+                if "illustrative" in marked:
                     illustrative += 1
                 else:
                     checkable.append((lesson["slug"], heading,
@@ -2479,7 +2506,7 @@ JAVA_OBJECTS = {
     "queue": "Deque<Integer> queue = new ArrayDeque<>()",
 }
 JAVA_DIMS = 3
-JAVAC_FLOOR = 50
+JAVAC_FLOOR = 105
 
 
 def java_declaration(name: str, source: str) -> str:
@@ -2692,6 +2719,30 @@ def check_java(lessons: list[dict]) -> None:
 TAGS = re.compile(r"<[^>]+>")
 
 
+def check_repros(lessons: list[dict]) -> None:
+    """Every lesson pairs a bug with its fix, and the two must differ.
+
+    A repro is only worth the space if the reader can diff it by eye, so this
+    checks the two halves exist and are not the same code -- the failure mode
+    when a pair is edited is that one side gets fixed and the other is
+    forgotten, which reads as a lesson with no bug in it.
+    """
+    for lesson in lessons:
+        repro = lesson.get("repro") or ""
+        blocks = LESSON_CODE.findall(repro)
+        assert len(blocks) == 2, f"{lesson['slug']}: repro has {len(blocks)} blocks"
+        (bad_class, bad), (good_class, good) = blocks
+        assert "bad" in bad_class and "good" in good_class, lesson["slug"]
+        assert bad.strip() != good.strip(), (
+            f"{lesson['slug']}: the two halves of the repro are identical")
+        for line in html.unescape(bad).splitlines() + html.unescape(good).splitlines():
+            assert len(line) <= course.REPRO_COLUMNS, (
+                f"{lesson['slug']}: {len(line)} columns, over the "
+                f"{course.REPRO_COLUMNS} a half-width column fits: {line!r}")
+    print(f"  repros: {len(lessons)} bug/fix pairs, both halves checked by "
+          f"javac, none over {course.REPRO_COLUMNS} columns")
+
+
 def lesson_prose(lesson: dict) -> str:
     """Every authored sentence in a lesson, with the markup taken out.
 
@@ -2719,7 +2770,8 @@ def lesson_words(lesson: dict) -> int:
     """Words on the lesson page itself -- what a reader sits down to read."""
     reference = lesson.get("reference")
     moved = {id(body) for _, body in (reference["sections"] if reference else [])}
-    prose = [lesson["why"], lesson.get("summary") or "", lesson["drill"],
+    prose = [lesson["why"], lesson.get("summary") or "",
+             lesson.get("repro") or "", lesson["drill"],
              *lesson["rules"], *lesson["objectives"],
              *[b for _, b in lesson["basics"] if id(b) not in moved],
              *[f"{a} {b}" for a, b in lesson["used_for"]],
@@ -2786,6 +2838,7 @@ def check_stylesheet() -> None:
     # is the important one: the analysis quotes submission paths inline, and a
     # 70-character token with no space in it drags the whole page with it.
     assert "overflow-wrap:break-word" in CSS, "a long path would widen the page"
+    assert "pre{overflow-x:auto}" in CSS, "a long code line would widen the page"
     assert ".table-scroll{overflow-x:auto" in CSS, "wide tables would widen the page"
     assert ".lesson-table:not(.pairs){display:block;overflow-x:auto}" in CSS, (
         "an authored table would widen the page below 34rem")
@@ -3000,24 +3053,148 @@ the record proves and stop there.</p>
     return page("The four you never solved -- Improvement Book", body)
 
 
+# A bug you last made in 2020 and a bug you made last month are not the same
+# problem, and counting citations treats them as if they were. Half-life is the
+# only knob here, and the tier boundaries barely move between twelve months and
+# twenty-four -- which is the reason to trust the ordering it produces rather
+# than the exact scores.
+LESSON_HALF_LIFE = 18 * 30.44 * 86400   # seconds; about eighteen months
+
+
+def lesson_score(hits: list[tuple], latest: int) -> float:
+    """What this lesson is still costing you, discounted by age.
+
+    Severity of the verdict, halved for every half-life between the submission
+    and the most recent one in the export, then widened by how many topics the
+    bug turns up in: the same mistake in twenty topics is a habit, and the same
+    mistake in one is that topic's problem.
+    """
+    weight = 0.0
+    for _, _, mistake in hits:
+        when = mistake_time(mistake)
+        if not when:
+            continue
+        status = (mistake.get("status")
+                  or submission_status(mistake.get("file", "")) or "")
+        weight += (STATUS_WEIGHT.get(status, DEFAULT_STATUS_WEIGHT)
+                   * 0.5 ** ((latest - when) / LESSON_HALF_LIFE))
+    topics = len({chapter.name for chapter, _, _ in hits})
+    return weight * math.log2(2 + topics)
+
+
+# Each tier is worth half of the one above it. That is the whole rule: no slice
+# points to tune, and a lesson moves between tiers only when the evidence moves.
+TIERS = [
+    ("A", "Fix these first",
+     "Still happening, across many topics, on verdicts that cost you the "
+     "attempt. Work these in order before anything else."),
+    ("B", "Then these",
+     "Real and recent, but either narrower or on cheaper verdicts. Read the "
+     "lesson, do the drill once."),
+    ("C", "Know the shape",
+     "Happens, but rarely or long ago. Read the bug in miniature and the rules; "
+     "skip the drill until one of these actually bites."),
+    ("D", "Not seen lately",
+     "Almost nothing in the last year. Kept because the material is worth "
+     "having, not because it is a gap you have now."),
+]
+
+
+def lesson_tiers(lessons: list[dict],
+                 evidence: dict[str, list]) -> list[tuple[str, str, str, list]]:
+    """(letter, title, blurb, [(score, lesson)]) with the top tier first."""
+    latest = max((mistake_time(m) for hits in evidence.values()
+                  for _, _, m in hits), default=0)
+    scored = sorted(((lesson_score(evidence[l["slug"]], latest), l)
+                     for l in lessons), key=lambda pair: -pair[0])
+    top = scored[0][0] if scored else 0.0
+    groups: list[list] = [[] for _ in TIERS]
+    for score, lesson in scored:
+        index = 0
+        while index < len(TIERS) - 1 and score < top / 2 ** (index + 1):
+            index += 1
+        groups[index].append((score, lesson))
+    assert sum(len(g) for g in groups) == len(lessons)
+    return [(letter, title, blurb, group)
+            for (letter, title, blurb), group in zip(TIERS, groups)]
+
+
+# The last year the export has a submission in. A lesson's year-by-year counts
+# run to here rather than to its own last citation: a run of trailing zeroes is
+# the signal that a bug stopped happening, and a table that ends at the last hit
+# is exactly the table that cannot show it.
+LATEST_YEAR = {"value": 0}
+
+
+def lesson_history(hits: list[tuple]) -> list[tuple[str, int]]:
+    """This lesson's own citations by calendar year, with the empty years kept."""
+    years = [datetime.date.fromtimestamp(t).year
+             for t in (mistake_time(m) for _, _, m in hits) if t]
+    if not years:
+        return []
+    counts = Counter(years)
+    last = max(LATEST_YEAR["value"], max(years))
+    return [(str(y), counts.get(y, 0)) for y in range(min(years), last + 1)]
+
+
+def last_seen(rows: list[tuple[str, int]]) -> str:
+    """The most recent year this lesson's bug happened at all, or ""."""
+    return next((year for year, n in reversed(rows) if n), "")
+
+
+def render_lesson_history(hits: list[tuple]) -> str:
+    """Did this lesson's bug stop happening? The only honest answer is the count."""
+    rows = lesson_history(hits)
+    if len(rows) < 2:
+        return ""
+    peak = max(n for _, n in rows)
+    bars = "".join(
+        f'<tr><th>{esc(year)}</th>'
+        f'<td class="bar"><span style="width:{n / peak * 100:.1f}%"></span>'
+        f"<em>{n}</em></td></tr>" for year, n in rows)
+    seen, latest = last_seen(rows), rows[-1][0]
+    verdict = (f"still happening in {esc(latest)}" if seen == latest else
+               f"last seen in {esc(seen)}, nothing since")
+    return f"""<details class="lesson-history"><summary>This mistake, year by
+year &mdash; {verdict}</summary>
+<p class="hint">Counted from the same join as the evidence below, so a year
+with no bar is a year in which nothing matched &mdash; not a year with no
+data. Practice was not evenly spread, so read the shape, not the exact
+heights: <a href="trend.html">activity over time</a> has the denominator.</p>
+<table class="year-bars">{bars}</table></details>"""
+
+
 def render_course_index(lessons: list[dict], evidence: dict[str, list]) -> str:
     # Distinct mistakes, not the sum of per-lesson counts: a bug that is both an
     # overflow and a sentinel bug is cited twice and must still be counted once.
     total_cited = len({id(m) for hits in evidence.values() for _, _, m in hits})
-    rows = []
-    for i, lesson in enumerate(lessons, 1):
-        hits = evidence.get(lesson["slug"], [])
-        topics = len({chapter.name for chapter, _, _ in hits})
-        badge = (f'<span class="badge warn">{plural(len(hits), "mistake")} '
-                 f'in {plural(topics, "topic")}</span>' if hits else "")
-        rows.append(f"""<li>
+    sections = []
+    for letter, title, blurb, group in lesson_tiers(lessons, evidence):
+        rows = []
+        for _, lesson in group:
+            hits = evidence.get(lesson["slug"], [])
+            topics = len({chapter.name for chapter, _, _ in hits})
+            years = lesson_history(hits)
+            seen = last_seen(years)
+            badges = [f'<span class="badge warn">{plural(len(hits), "mistake")} '
+                      f'in {plural(topics, "topic")}</span>']
+            if seen:
+                badges.append(f'<span class="badge">last {esc(seen)}</span>'
+                              if seen == years[-1][0] else
+                              f'<span class="badge stale">none since '
+                              f"{esc(seen)}</span>")
+            rows.append(f"""<li>
 <a class="tile" href="course-{esc(lesson['slug'])}.html">
-<span class="rank">{i}</span>
+<span class="rank">{LESSON_INDEX[lesson['slug']][0]}</span>
 <span class="tile-main">
   <strong>{esc(lesson['title'])}</strong>
   <span class="tile-nums">{esc_code(lesson['one_line'])}</span>
-  <span class="tile-badges">{badge}</span>
+  <span class="tile-badges">{''.join(badges)}</span>
 </span></a></li>""")
+        sections.append(f"""<section class="tier">
+<h2><span class="tier-letter">{esc(letter)}</span>{esc(title)}</h2>
+<p class="hint">{esc(blurb)}</p>
+<ol class="tiles">{''.join(rows)}</ol></section>""")
 
     body = f"""<nav class="crumb"><a href="index.html">&larr; All topics</a> &middot;
 <a href="mistakes.html">Every mistake</a> &middot;
@@ -3025,9 +3202,16 @@ def render_course_index(lessons: list[dict], evidence: dict[str, list]) -> str:
 <header class="cover">
 <p class="eyebrow">A course built backwards from your own bugs</p>
 <h1>The mini course</h1>
-<p class="lede">{plural(len(lessons), 'lesson')}, ordered so the earlier ones stop
-the most bugs. {total_cited} of the 904 diagnosed mistakes in your export are
-cited somewhere in these lessons.</p>
+<p class="lede">{plural(len(lessons), 'lesson')}, sorted into four tiers by
+what each one is still costing you: how severe the verdicts were, how many
+topics the bug turns up in, and &mdash; the part that moves lessons most &mdash;
+how recently it last happened. {total_cited} of the 904 diagnosed mistakes in
+your export are cited somewhere in these lessons.</p>
+<p class="lede">Every tier is worth about half of the one above it. That is the
+whole rule, so nothing here is a judgement call: a lesson changes tier when the
+evidence changes, not when the prose does. The number on each tile is its place
+in the reading order, which is a different thing &mdash; it respects
+prerequisites, and tier A is where to spend your time.</p>
 <p class="lede">Every lesson is built the same way, and the bar at the top of
 each page jumps between the parts:</p>
 <ol class="shape">
@@ -3046,11 +3230,10 @@ submissions, each with what went wrong and what you changed.</li>
 <p class="lede">Examples are Java, because that is 93% of this export. The
 "where you actually hit this" section on each page is generated from
 <code>findings/*.json</code>, so it stays true as the analysis is redone.</p>
-<p class="also">Work through them in order. The first four are not about any
-particular data structure &mdash; they are the ones that cost you attempts on
-every topic at once.</p>
+<p class="also">Read a lesson in its numbered order if you want the course;
+work tier A first if you want the attempts back.</p>
 </header>
-<section class="tier"><ol class="tiles">{''.join(rows)}</ol></section>"""
+{''.join(sections)}"""
     return page("The mini course -- Improvement Book", body)
 
 
@@ -3424,6 +3607,10 @@ CSS = """
 --muted:#a09a90;--line:#33313a;--accent:#e08b6f;--good:#6cc38d;--bad:#f08a78;
 --warn:#e0b95c;--code:#141318;}}
 *{box-sizing:border-box}
+/* Every code block scrolls inside itself. The figure and lesson variants set
+   this again below; this is for the bare <pre> written straight into a lesson,
+   which otherwise widens the whole page on a phone. */
+pre{overflow-x:auto}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px;
   border-radius:2px}
 body{margin:0;padding:2rem 1.25rem 4rem;background:var(--bg);color:var(--ink);
@@ -3610,6 +3797,32 @@ padding-right:1.4rem}
 border-left:3px solid var(--good);border-radius:6px}
 .lesson-part{margin:2.5rem 0}
 .lesson-part p{max-width:44rem}
+.tier-letter{display:inline-grid;place-items:center;width:1.6rem;height:1.6rem;
+ margin-right:.5rem;border-radius:50%;background:var(--accent);color:var(--bg);
+ font:700 .8rem/1 ui-sans-serif,system-ui,sans-serif;vertical-align:.1rem}
+.lesson-history{margin:.6rem 0 1rem;font-size:.9rem}
+.lesson-history summary{cursor:pointer;color:var(--muted)}
+.year-bars{margin:.6rem 0 0;border-collapse:collapse;width:100%;max-width:26rem}
+.year-bars th{text-align:left;font-weight:400;color:var(--muted);
+ padding:.15rem .6rem .15rem 0;font-size:.85rem;font-variant-numeric:tabular-nums}
+.year-bars td{padding:.15rem 0}
+.repro{display:grid;gap:.9rem;margin:1rem 0}
+/* Side by side only where 64 monospace columns actually fit. 13px monospace
+   is 7.83px a character, so a column needs 533px and the pair needs 1100 --
+   wider than the 60rem text measure, so the block steps outside it. Below
+   that the two halves stack, which still reads as a diff. */
+@media(min-width:1220px){.repro{grid-template-columns:1fr 1fr;
+ width:1100px;margin-inline:-90px}}
+.repro figure{margin:0;min-width:0}
+.repro figcaption{font:600 11px/1.4 ui-sans-serif,system-ui,sans-serif;
+ letter-spacing:.08em;text-transform:uppercase;margin-bottom:.35rem}
+.repro figure:first-child figcaption{color:var(--bad)}
+.repro figure:last-child figcaption{color:var(--good)}
+.repro .lesson-code{margin:0;height:calc(100% - 1.1rem)}
+.lesson-code.bad{border-left:3px solid var(--bad)}
+.lesson-code.good{border-left:3px solid var(--good)}
+.repro-note{margin:.2rem 0 1.1rem;color:var(--muted);font-size:.9rem;
+ max-width:44rem}
 .lesson-code{margin:1rem 0;padding:.8rem .9rem;background:var(--code);
 border:1px solid var(--line);border-radius:6px;overflow-x:auto}
 .lesson-code code{font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace}
@@ -3901,6 +4114,10 @@ def load_book() -> tuple:
         COUNTS[f"habits:{slug}"] = len(habits[slug])
         COUNTS[f"problems:{slug}"] = len({case.slug for _, case, _ in joined})
         COUNTS[f"topics:{slug}"] = len({ch.name for ch, _, _ in joined})
+    LATEST_YEAR["value"] = max(
+        (datetime.date.fromtimestamp(mistake_time(m)).year
+         for hits in evidence.values() for _, _, m in hits if mistake_time(m)),
+        default=0)
     submitted = overview["total_submissions"]
     for status, count in overview["status_counts"].items():
         COUNTS[f"status:{status}"] = count
@@ -3966,12 +4183,16 @@ def main() -> None:
 
     (BOOK / "course.html").write_text(
         render_course_index(lessons, evidence), encoding="utf-8")
+    tiers = lesson_tiers(lessons, evidence)
+    tier_of = {l["slug"]: (letter, title)
+               for letter, title, _, group in tiers for _, l in group}
     for i, lesson in enumerate(lessons):
         (BOOK / f"course-{lesson['slug']}.html").write_text(
             render_lesson(lesson, evidence[lesson["slug"]], i + 1, len(lessons),
                           lessons[i - 1] if i else None,
                           lessons[i + 1] if i + 1 < len(lessons) else None,
-                          habits[lesson["slug"]], len(drills[lesson["slug"]])),
+                          habits[lesson["slug"]], len(drills[lesson["slug"]]),
+                          tier_of[lesson["slug"]]),
             encoding="utf-8")
         if lesson.get("reference"):
             (BOOK / f"reference-{lesson['slug']}.html").write_text(
@@ -4074,6 +4295,11 @@ def main() -> None:
     print("  " + re.sub(r"&[a-z]+;", "->", STAMP["line"] + STAMP["changes"]))
     print(f"book/: {len(list(BOOK.glob('*.html')))} pages, {total} chapters, "
           f"{len(lessons)} lessons, {mistakes} mistakes")
+    print("Lessons by what they still cost you "
+          f"(half-life {LESSON_HALF_LIFE / 86400 / 30.44:.0f} months):")
+    for letter, title, _, group in tiers:
+        names = ", ".join(l["slug"] for _, l in group)
+        print(f"  {letter} {title:<16} {len(group):>2} -- {names}")
     print("Top 10 by priority:")
     for i, chapter in enumerate(chapters[:10], 1):
         print(f"  {i:2}. {chapter.name:<30} "
@@ -4177,8 +4403,8 @@ def _selfcheck() -> None:
         assert len(ids) == len(set(ids)), (lesson["slug"], "duplicate id")
         for href in re.findall(r'href="#([^"]+)"', html):
             assert href in ids, (lesson["slug"], f"#{href} has no target")
-        for part in ("summary", "uses", "patterns", "depth", "mistakes",
-                     "fixes", "habits", "drill"):
+        for part in ("summary", "repro", "uses", "patterns", "depth",
+                     "mistakes", "fixes", "habits", "drill"):
             assert f'id="{part}"' in html, (lesson["slug"], f"no {part} section")
 
     # Folding is by octet and must never split a multi-byte character, which is
@@ -4207,6 +4433,7 @@ def _selfcheck() -> None:
     assert glossary_links("<p>heaped</p>") == "<p>heaped</p>", "whole words only"
     assert glossary_links("<pre>heap</pre><p>heap</p>").count("<a") == 1
 
+    check_repros(course.LESSONS)  # every lesson pairs a bug with its fix
     check_java(course.LESSONS)  # every sample in the book, through a compiler
     check_claims(course.LESSONS, chapters)  # the export still backs the prose
     check_length(course.LESSONS)  # still one sitting per lesson
