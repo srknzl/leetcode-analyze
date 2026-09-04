@@ -5285,7 +5285,13 @@ for (int i = 0; i < half; i++) pq.poll();
  "match": r"compile|rename|undeclared|cannot find symbol|does not (exist|"
           r"compile)|mid-edit|typo|missing (parenthes|semicolon|brace)|"
           r"copy.?paste|stale variable|wrong loop variable|scaffolding|"
-          r"no condition",
+          r"no condition|missing (import|closing|the `?\)|brace|paren)|"
+          r"forgot `?use |dropped again|stray (extra |literal )?(\)|\}|character|brace)|"
+          r"unfinished (method|stub)|half-written|never (initiali[sz]ed|declared)|"
+          r"no declaration|left (a |the )?debug|System\.out\.print|duplicate (nested|`case)|"
+          r"illegal .{0,14}syntax|omitting the `?class|not valid Java|implicitly narrow|"
+          r"before it was declared|leftover|paste artifact|fat.finger|editing slip|"
+          r"pasted inside|wrapping the real function",
  "basics": [
   ("What it actually costs",
    diagrams.submit_loop() +
@@ -5335,6 +5341,480 @@ for (int i = 0; i < half; i++) pq.poll();
  "drill": "For one week, write the hypothesis sentence in a comment at the top of every "
           "resubmission. Delete it before submitting. The point is the writing, not the "
           "comment.",
+},
+
+{
+ "slug": "post-solve-regression",
+ "title": "After the green tick: the rewrite that broke what worked",
+ "one_line": "The problem was already Accepted. Then you rewrote it, and the rewrite was wrong.",
+ "why": "{{mistakes:post-solve-regression}} diagnosed mistakes across "
+        "{{problems:post-solve-regression}} problems were made *after* the problem "
+        "was already solved. That is the single largest slice of your export, and "
+        "it is the one slice that cost you nothing on the scoreboard and everything "
+        "in time: a `Set` swapped for a `List` that then double-counts, a Java "
+        "solution ported to Python without `self`, a working stack rewritten as a "
+        "counter pair that loses the running maximum. You are right to revisit "
+        "solved problems -- that is where the learning is. The failure is treating "
+        "the rewrite as an edit when it is a new solution.",
+ "summary": "<p>Roughly one in five of your diagnosed mistakes happens on a problem "
+            "you had already solved. These are post-solve submissions: you go back to "
+            "optimise, to port to another language, or to re-solve from scratch as "
+            "practice.</p>"
+            "<p>That instinct is good and this lesson does not ask you to stop. It asks "
+            "you to notice that you have an oracle sitting right there -- the accepted "
+            "version -- and that you almost never use it. A rewrite is a new solution "
+            "with an old solution available to check it against, and checking it "
+            "against that costs less than the resubmission does.</p>",
+ "used_for": [
+  ("Optimising an accepted solution",
+   "The accepted version is your reference implementation. Keep it open, and diff behaviour, not just code."),
+  ("Porting to another language",
+   "The signature and the call convention are part of the port, and they are the part you skip."),
+  ("Re-solving from scratch as practice",
+   "Deliberate practice is the whole point. Just do not submit the practice attempt as if it were a fix."),
+  ("Cleaning up code you are not happy with",
+   "A readability rewrite changes behaviour more often than a performance one, because nobody expects it to."),
+ ],
+ "patterns": [
+  ("You are editing a problem that already shows Accepted",
+   "You are in the highest-risk mode in your history. Slow down by exactly one step: keep the old version."),
+  ("The rewrite changes the algorithm and the language at once",
+   "Two changes, one submission, no bisect. Split them."),
+  ("The rewrite fails twice in a row",
+   "Go back to the accepted version and start again from it. Patching a broken rewrite is how three attempts become seven."),
+  ("You are simplifying an expression you no longer remember deriving",
+   "That is where the division you dropped was load-bearing. Re-derive before you simplify."),
+ ],
+ "match": r"post.?solve|post_solve|already (solved|accepted|working)|already-Accepted|"
+          r"revisit(ed|ing)?\b|re-?introduc|rewrite (that )?(introduced|broke)|"
+          r"refactor(ing)? introduced|on a problem already",
+ "basics": [
+  ("The mode you are in when it happens",
+   "<p>A post-solve submission is any submission on a problem whose Accepted verdict "
+   "you already have. Your export separates them, and the separation is stark: these "
+   "attempts cost no solve-rate and appear in no first-attempt metric, so nothing in "
+   "the scoreboard ever told you they were going wrong.</p>"
+   "<p>Three shapes account for nearly all of them.</p>"
+   "<p><strong>The port.</strong> You have Java that works and you rewrite it in "
+   "Python, Rust or C++. On <code>stone-game-ii</code> the port went out as a bare "
+   "top-level function with no <code>class Solution</code> wrapper; the next attempt "
+   "added the wrapper but omitted Python's explicit <code>self</code>; the attempt "
+   "after that stripped the type hints and still omitted <code>self</code>. Three "
+   "Runtime Errors in a row, none of them about the algorithm, which had been correct "
+   "for months.</p>"
+   "<p><strong>The optimisation.</strong> You replace a working structure with a "
+   "faster one. On <code>first-unique-character-in-a-string</code> a refactor "
+   "introduced <code>unordered_map&lt;int,int&gt; c</code> and then counted with "
+   "<code>c[i]++</code> instead of <code>c[s[i]]++</code> -- keyed on position rather "
+   "than on the letter, which is not a slower answer but a different one.</p>"
+   "<p><strong>The rewrite.</strong> You throw the solution away and solve it again. "
+   "On <code>longest-valid-parentheses</code> a stack solution that worked was "
+   "replaced by a pair of counters, which loses the running maximum across groups; "
+   "the follow-up rewrite added an accumulator and was still wrong, and the session "
+   "ended without recovering the working answer.</p>"),
+  ("You already have the oracle",
+   "<p>This is the part that makes post-solve regressions different from every other "
+   "class of mistake in this book. Everywhere else, when you want to know whether your "
+   "code is right, you have to reason about it. Here you do not: there is a program "
+   "sitting in your submission history that is known to be correct on this exact "
+   "problem.</p>"
+   "<p>So run both. Generate a few hundred small random inputs, run the old solution "
+   "and the new one, and compare outputs. Small is the operative word -- the "
+   "disagreements show up on <code>n = 0</code>, <code>n = 1</code> and repeated "
+   "elements, not on the large cases. This is differential testing, and it takes about "
+   "twenty lines of scaffolding that you write once and keep.</p>"
+   "<p>It catches the entire class. The <code>c[i]++</code> keying bug, the dropped "
+   "<code>// self._prefix[~k]</code> division on "
+   "<code>product-of-the-last-k-numbers</code>, the pivot double-counted on "
+   "<code>max-points-on-a-line</code> -- every one of them disagrees with the accepted "
+   "version on inputs a random generator produces in its first dozen tries.</p>"),
+  ("One change per submission",
+   "<p>The rewrites that took the most attempts to recover are the ones that changed "
+   "several things at once. On <code>basic-calculator</code>, a same-day revisit four "
+   "months after the first solve rebuilt the parser around a <code>Token</code> class "
+   "carrying multiply and divide types the problem does not have, and at the same time "
+   "tried to encode unary minus with a boolean flag flipped in several places. When "
+   "that failed there was no way to tell which half was wrong, so the flag became an "
+   "int counter, and then it was abandoned.</p>"
+   "<p>The rule is the one you would apply to a commit. Change the data structure, or "
+   "change the language, or change the algorithm -- not two of them in one "
+   "submission. Not because a big rewrite is wrong, but because when it fails you want "
+   "the failure to name its cause.</p>"),
+  ("When to stop and roll back",
+   "<p>There is a specific moment worth learning to recognise: the second consecutive "
+   "failure of a rewrite. At that point you are debugging code you wrote ten minutes "
+   "ago against a problem you solved months ago, and the accepted version is still "
+   "sitting there.</p>"
+   "<p>Go back to it. Start the rewrite again from the working code, changing one "
+   "thing. The alternative is on the record: <code>reconstruct-itinerary</code> ran "
+   "four attempts deep into a phantom-edge balancing scheme, fixing a wrap-around "
+   "off-by-one inside a strategy that was then abandoned wholesale for a direct "
+   "Hierholzer walk. Every attempt after the second was spent on an approach that did "
+   "not survive.</p>"),
+ ],
+ "rules": [
+  "Before a post-solve rewrite, keep the accepted version open. It is your oracle, not just your history.",
+  "Diff the rewrite against the accepted version on a few hundred small random inputs before submitting.",
+  "One change per submission: the structure, or the language, or the algorithm. Never two.",
+  "Second consecutive failure of a rewrite: roll back to the accepted version and restart from it.",
+ ],
+ "drill": "Pick three problems you have re-solved post-solve and write the twenty-line "
+          "differential harness once: random small input, both solutions, compare. Keep "
+          "it. Every future rewrite reuses it, and the whole class of bug in this lesson "
+          "stops reaching the judge.",
+},
+
+{
+ "slug": "derive-dont-guess",
+ "title": "Guess and check: the constant you tuned until it passed",
+ "one_line": "Four attempts, four different paddings, and the one that finally passed was the first one you tried.",
+ "why": "{{mistakes:derive-dont-guess}} diagnosed mistakes across "
+        "{{problems:derive-dont-guess}} problems are a value adjusted until the judge "
+        "agreed rather than derived until it was right: a bound bumped from `10001` to "
+        "`100001`, a `return result + 1` bolted onto a double-count, seven attempts of "
+        "ad hoc wall detection on `trapping-rain-water`. The judge is a test suite, not "
+        "a proof, and code that passes it by coincidence passes it silently.",
+ "summary": "<p>This is a lesson about a debugging mode rather than an algorithm. It "
+            "starts when a submission is close, and instead of asking why it is wrong "
+            "you adjust something and resubmit to find out.</p>"
+            "<p>The adjustment is usually small and usually plausible -- a bound, a "
+            "constant, a comparison, a <code>+1</code>. Sometimes it passes. When it "
+            "does, you have not learned what was wrong, and the export shows the "
+            "cost: on the problems where this happened, the accepted submission is "
+            "routinely a value you had already tried several attempts earlier.</p>",
+ "used_for": [
+  ("A submission that is wrong by a small, constant amount",
+   "The strongest temptation to patch, and the strongest signal of a specific structural cause."),
+  ("Choosing an array size or a loop bound",
+   "Derive it from the constraint line. A number that came from a failing test fits that test."),
+  ("A formula you cannot re-derive on paper",
+   "If you cannot get back to it, you cannot tell a typo in it from a truth."),
+  ("Any fix whose whole content is a number",
+   "Changing a literal is the cheapest edit to make and the most expensive one to be wrong about."),
+ ],
+ "patterns": [
+  ("The fix under consideration is adding or subtracting one",
+   "You have found the symptom. Find what is counted twice, or not at all."),
+  ("You are on the third variation of the same idea",
+   "Stop submitting. The idea is what is wrong, not this instance of it."),
+  ("A constant in your code has no name and no derivation",
+   "Say out loud what it means. If you cannot, it is a bug that has not failed yet."),
+  ("The accepted version is something you already tried",
+   "That is the signature of guess-and-check, and it means the problem is still not understood."),
+ ],
+ "match": r"guess(ed|ing|es)?\b|guess-and-check|ad hoc|ad-hoc|heuristic|"
+          r"plausible.{0,14}(looking|but)|without (first )?deriv|rather than deriv|"
+          r"did not derive|compensating constant|hard.?cod|bumped the|blindly|"
+          r"trial.and.error|magic number|patched onto the symptom|"
+          r"tried .{0,25}variations|happening to match|happened to match",
+ "basics": [
+  ("What it looks like from the outside",
+   "<p><code>cracking-the-safe</code> is the clearest case in the export, because all "
+   "four attempts are recorded. The Euler tour needs the start node's "
+   "<code>n-1</code> characters appended to close the circuit. Instead the code "
+   "appended one literal <code>\"0\"</code>. The attempts, in order:</p>"
+   "<ol>"
+   "<li>Replace the single append with <code>repeat(\"0\", n - 2)</code> -- the "
+   "analysis records this as guessing the padding amount rather than deriving it.</li>"
+   "<li>Add <code>&amp;&amp; k &gt; 1</code> to the guard. Changes which cases pad at "
+   "all; does not change what the padding is.</li>"
+   "<li>Remove the padding branch entirely and return the raw tour.</li>"
+   "<li>Put back the <code>n - 2</code> padding under <code>if (n &gt; 2)</code> -- "
+   "the same thing tried three attempts earlier -- and this time it passed.</li>"
+   "</ol>"
+   "<p>Four attempts, and the accepted code is attempt one. Nothing was learned in "
+   "between, because no attempt was an answer to a question. Deriving the padding "
+   "takes a minute: the tour visits every length-<code>n</code> string as an edge, "
+   "the start node is a length-<code>(n-1)</code> string, and closing the circuit "
+   "means writing it out. That derivation also tells you the answer for "
+   "<code>k = 1</code> without a special case.</p>"),
+  ("The compensating constant",
+   "<p>The most recognisable shape: the answer is consistently off by a fixed amount, "
+   "and the fix adjusts the answer rather than the cause.</p>"
+   "<p>On <code>max-points-on-a-line</code>, a rewrite started the inner loop at "
+   "<code>j = i</code>, which puts the pivot point into its own angle map, and then "
+   "added <code>localMax + 1</code> to the result. Every count was one too high. The "
+   "attempted fix was <code>return result + 1;</code> -- a second constant to "
+   "compensate for the first. The accepted version instead excluded the pivot from "
+   "its own map, at which point no constant is needed anywhere.</p>"
+   "<p>An off-by-a-constant answer is the most informative failure you get. A wrong "
+   "algorithm is usually wrong by varying amounts; a fixed offset means something "
+   "specific is counted once too often or once too rarely, and it is findable. "
+   "Cancelling it with a literal throws that information away and leaves code whose "
+   "two errors happen to agree on the tests you ran.</p>"),
+  ("Bounds that came from a failing test",
+   "<p><code>first-missing-positive</code> was written with a scan bound of "
+   "<code>10001</code>. The constraint line allows <code>nums.length</code> up to "
+   "10&#8309;, so answers above 10001 were unreachable. The fix bumped the literal to "
+   "<code>100001</code> and passed.</p>"
+   "<p>It passes, and it is still wrong in the way that matters: the number is not "
+   "connected to anything. The bound the problem actually implies is "
+   "<code>nums.length + 1</code>, because among <code>n</code> integers the smallest "
+   "missing positive cannot exceed <code>n + 1</code>. That version needs no literal "
+   "at all, is smaller, and is correct for every input rather than for every input "
+   "under a hundred thousand.</p>"
+   "<p>The test: for each constant in your solution, say what it means in one phrase. "
+   "&ldquo;One past the largest index&rdquo; is a meaning. &ldquo;Big enough&rdquo; is "
+   "not.</p>"),
+  ("The exit condition",
+   "<p>Guess-and-check is not always wrong. Trying something to see what happens is a "
+   "legitimate way to build intuition on a problem you do not yet understand. What "
+   "makes it costly is having no exit condition, so let this be it: <strong>three "
+   "attempts of the same shape, then stop and derive on paper.</strong></p>"
+   "<p><code>trapping-rain-water</code> is the case for the rule. Seven attempts went "
+   "into an ad hoc wall-detection scheme -- local maxima, a "
+   "<code>highestLastWallHeight</code>, a <code>possibleWall</code> left at "
+   "<code>-1</code> and then used as an index -- drifting across four rewrites without "
+   "ever becoming correct. The bookkeeping got more elaborate each time because each "
+   "attempt inherited the previous one's frame. Nothing in that sequence was going to "
+   "converge, and the only move that helps at attempt three is the one that leaves the "
+   "editor.</p>"),
+ ],
+ "rules": [
+  "Every constant must have a one-phrase meaning. 'Big enough' is not one.",
+  "An answer wrong by a fixed amount names its own cause. Find what is double-counted before you add a compensating term.",
+  "Derive bounds from the constraint line, never from the test that failed.",
+  "Three attempts of the same shape: stop submitting, derive on paper.",
+ ],
+ "drill": "Take `cracking-the-safe` and `first-missing-positive` and, without looking at "
+          "your submissions, derive each bound from the problem statement in writing -- "
+          "why the padding is the start node, why the answer cannot exceed `n + 1`. Then "
+          "write the solution. The point is that the code follows the derivation.",
+},
+
+{
+ "slug": "read-the-statement",
+ "title": "Answering the exact question that was asked",
+ "one_line": "Correct algorithm, correct code, wrong question -- and the judge only ever tells you the last part.",
+ "why": "{{mistakes:read-the-statement}} diagnosed mistakes across "
+        "{{problems:read-the-statement}} problems are cases where the algorithm was "
+        "right and the answer was not: 0-indexed positions where the problem asks for "
+        "1-indexed, duplicates in a result that must be distinct, `\"EAST\"` where the "
+        "expected output is `\"East\"`, a digit sum checked where the problem said "
+        "digit product. These are the cheapest mistakes in the book to eliminate, "
+        "because they are all findable before you write a line of code.",
+ "summary": "<p>Every problem has two specifications: the interesting one, about what "
+            "to compute, and the boring one, about exactly what shape the answer takes "
+            "and exactly how the method is called. You reliably read the first. The "
+            "second is where this class of mistake lives.</p>"
+            "<p>It is worth separating from ordinary bugs because the diagnosis is "
+            "different. When the algorithm is wrong you debug the algorithm. When the "
+            "contract is wrong the algorithm is perfect and re-reading the code will "
+            "never show you the problem, because the code says what you meant.</p>",
+ "used_for": [
+  ("Before writing the first line",
+   "The output contract costs thirty seconds to copy down and is the whole of this lesson."),
+  ("Porting a solution to another language",
+   "The signature is part of the port, and it is the part that gets skipped."),
+  ("Problems whose output is a list",
+   "Distinct or not, sorted or not, one entry per input or one per distinct value -- four decisions, all in the statement."),
+  ("Problems with a stated edge convention",
+   "Leading zeros, 1-based labels, empty-input results: stated explicitly, and easy to read past."),
+ ],
+ "patterns": [
+  ("Your output is right but rejected",
+   "Read the expected output of the failing example character by character. Case, order, indexing, duplicates."),
+  ("A Runtime Error on a problem you have already solved elsewhere",
+   "Suspect the call convention before the logic -- a missing wrapper class or receiver parameter."),
+  ("The result has repeated entries and the statement says distinct",
+   "The collection type is the bug, not the loop that filled it."),
+  ("You are computing something adjacent to what was asked",
+   "Sum where it said product, value where it said count. Re-read the sentence with the quantity in it."),
+ ],
+ "match": r"misread|misunderstood|misinterpret|problem (requires|defines|only asks|asks for|statement|says)|"
+          r"required (output|format|method|signature|return|to)|expected (output|call|format)|"
+          r"1-?indexed|0-?indexed|1-based|0-based|method (name|signature)|declared return type|"
+          r"class Solution|`self`|call convention|wrong problem|submission box|correctly-cased|"
+          r"what the problem|LeetCode (requires|defines|expects)|the actual question",
+ "basics": [
+  ("The output contract",
+   "<p>Four decisions live in the statement and nowhere in your code's logic.</p>"
+   "<p><strong>Indexing.</strong> <code>two-sum-ii</code> asks for 1-indexed "
+   "positions; the submission returned <code>{i, j}</code>. <code>find-the-town-judge</code> "
+   "labels people 1..N and the code used those labels directly as 0-indexed array "
+   "subscripts, running off the end at label N. Both are one-character fixes and both "
+   "cost an attempt.</p>"
+   "<p><strong>Duplicates.</strong> <code>find-the-difference-of-two-arrays</code> "
+   "requires distinct output. The code collected into <code>List&lt;Integer&gt;</code>, "
+   "so a value appearing twice in <code>nums1</code> appeared twice in the answer. The "
+   "fix was the collection type -- <code>Set</code> instead of <code>List</code> -- not "
+   "anything in the algorithm.</p>"
+   "<p><strong>Format.</strong> <code>walking-robot-simulation-ii</code> expects "
+   "<code>\"East\"</code>; the code returned <code>\"EAST\"</code>.</p>"
+   "<p><strong>Stated conventions.</strong> <code>valid-word-abbreviation</code> "
+   "defines a leading-zero digit run such as <code>\"a01b\"</code> as invalid. The "
+   "rule is in the statement; the code did not have it.</p>"),
+  ("The signature contract",
+   "<p>The harness calls your code in a specific way, and when you are writing in the "
+   "language you always use, you never think about it. Port to another language and it "
+   "becomes the first thing that breaks.</p>"
+   "<p><code>stone-game-ii</code> is three consecutive Runtime Errors on this and "
+   "nothing else: first a bare top-level function with no <code>class Solution</code>; "
+   "then the class, but with <code>def stoneGameII(piles)</code> and no "
+   "<code>self</code>; then the type hints removed and still no <code>self</code>. The "
+   "algorithm was already accepted in Java.</p>"
+   "<p>The same class, from the other direction: on "
+   "<code>design-add-and-search-words-data-structure</code>, a fix changed "
+   "<code>search</code>'s declared return type to <code>void</code>, which breaks the "
+   "required boolean-returning signature no matter how good the trie underneath is. "
+   "And on <code>number-of-closed-islands</code>, the submission was another problem's "
+   "solution entirely, pasted into the wrong tab.</p>"),
+  ("The quantity contract",
+   "<p>The subtlest version: you compute a real quantity, carefully and correctly, and "
+   "it is not the quantity in the sentence.</p>"
+   "<p><code>smallest-divisible-digit-product-i</code> asks whether the digit product "
+   "of <code>n</code> is divisible by <code>t</code>. The first attempt checked "
+   "whether <code>n</code> itself was divisible by <code>t</code>; the second checked "
+   "the digit <em>sum</em>. Two consecutive readings of the same sentence, two "
+   "different quantities, neither the right one.</p>"
+   "<p><code>longest-unequal-adjacent-groups-subsequence-i</code> is the same failure "
+   "at the level of the whole task: it was read as &ldquo;pick the longest word from "
+   "each run of equal groups&rdquo;, and a two-pass longest-word selector was built "
+   "for it. The problem only asks to keep one representative per run. The rewrite "
+   "that passed is a single pass, and it is shorter than the machinery built for the "
+   "misreading.</p>"),
+  ("The thirty-second habit that removes the class",
+   "<p>Before writing anything, copy the output specification into a comment: the "
+   "return type, the indexing base, whether the result must be distinct, whether it "
+   "must be sorted, and the exact format of any string. Then run the first provided "
+   "example by hand and compare it to the expected output character by "
+   "character.</p>"
+   "<p>This is not a proof technique and it is not clever. It is thirty seconds "
+   "against a class of bug that in your history costs an attempt every time it "
+   "appears, and that no amount of staring at the algorithm will ever reveal -- "
+   "because the algorithm is right.</p>"),
+ ],
+ "rules": [
+  "Copy the output spec into a comment before writing code: type, indexing base, distinct, sorted, exact string format.",
+  "Run the first provided example by hand and compare character by character before submitting.",
+  "When porting to another language, port the signature first and submit that skeleton in your head.",
+  "Underline the quantity in the sentence -- sum, product, count, value -- and check your code computes that one.",
+ ],
+ "drill": "For the next ten problems, write the output contract as a comment before the "
+          "first line of code, and delete it only when you submit. Then check the ten "
+          "against `two-sum-ii`, `find-the-difference-of-two-arrays` and "
+          "`walking-robot-simulation-ii`: every one of those three would have been "
+          "caught by the comment.",
+},
+
+{
+ "slug": "loop-bounds",
+ "title": "The bound and the operator",
+ "one_line": "`<` where you meant `<=`, and a range test joined by `||` that is true for every input.",
+ "why": "{{mistakes:loop-bounds}} diagnosed mistakes across "
+        "{{problems:loop-bounds}} problems are a loop that ran one step too far or "
+        "stopped one step short, or a comparison with the wrong strictness: "
+        "`i <= s.size()/2` undoing half a reversal, `l < r` leaving the last worker "
+        "unqueued, `newX >= 0 || newX < m` letting every index through. The algorithm "
+        "is right in all of them. One character is not.",
+ "summary": "<p>Loop bounds and comparison operators are where a correct plan becomes "
+            "an incorrect program. They are worth their own lesson because the fix is "
+            "always one character, which makes them feel too small to have a method -- "
+            "and because they are among the most frequent diagnoses in your "
+            "export.</p>"
+            "<p>Two habits remove most of them: writing every range half-open unless "
+            "you can say why not, and checking each new loop at <code>n = 1</code> and "
+            "<code>n = 2</code> before submitting.</p>",
+ "used_for": [
+  ("Every loop you write",
+   "The bound and the operator are two decisions, and they are usually made without being noticed."),
+  ("Two-dimensional bounds checks",
+   "A grid guard is four comparisons, and the way they are joined matters as much as the comparisons."),
+  ("Loops over a derived space",
+   "When the loop walks values rather than positions, the array's length is the wrong bound."),
+  ("Any loop touching the last element",
+   "Half of these mistakes are about whether the final index is included."),
+ ],
+ "patterns": [
+  ("The answer is right except at one end",
+   "The bound, not the body. Check the first and last iterations by hand."),
+  ("A bounds check that never seems to reject anything",
+   "Look for `||` where the range needs `&&`. It is true for every input and silently does nothing."),
+  ("Equal elements behave like unequal ones",
+   "The comparison's strictness is the bug: `<` where `<=` was meant, or the reverse."),
+  ("A loop guard using `<` when the range is inclusive",
+   "The last candidate is never considered. This is the single most common shape here."),
+ ],
+ "match": r"off.by.one|loop (bound|condition|guard|termination)|"
+          r"strict(ly)? (`?<|`?>|less|greater|inequality)|non-strict|"
+          r"changed (both |the )?(comparison|bound|guard|loop condition)|"
+          r"instead of `?&&|`?\|\|`? instead of|one (index |slot )?too (far|early|many)|"
+          r"stops one|one extra|one index too|one node too|one step (early|too)|"
+          r"upper bound|loop bound|the last (index|slot|element) ",
+ "basics": [
+  ("Half-open, unless you can say why not",
+   "<p>Write <code>for (int i = 0; i &lt; n; i++)</code> and the bound is the size, "
+   "the count of iterations is the size, and there is nothing to get wrong. Every "
+   "<code>&lt;=</code> is a claim that the last index is one you want, and every one "
+   "of them should be justifiable in a phrase.</p>"
+   "<p>Both directions appear in your history. <code>reverse-string</code> used "
+   "<code>i &lt;= s.size()/2</code>, performing one extra swap at the midpoint that "
+   "undid part of the reversal for even-length input. <code>total-cost-to-hire-k-workers</code> "
+   "went the other way: the refill guard was <code>l &lt; r</code>, so the case where "
+   "exactly one worker sits outside both windows -- <code>l == r</code> -- was never "
+   "queued. <code>first-missing-positive</code> made the same <code>l &lt; r</code> "
+   "mistake in the cyclic sort, leaving the last slot unchecked.</p>"
+   "<p>The rule is not that <code>&lt;=</code> is wrong. It is that half-open is the "
+   "default, and a closed range is a decision you should be able to defend.</p>"),
+  ("A range test is two comparisons joined by AND",
+   "<p><code>maximum-number-of-points-from-grid-queries</code> guarded a grid access "
+   "with:</p>"
+   "<pre><code>if (newX &gt;= 0 || newX &lt; m &amp;&amp; newY &gt;= 0 || newY &lt; n)</code></pre>"
+   "<p>Read it as the machine does. Every integer satisfies "
+   "<code>newX &gt;= 0</code> or <code>newX &lt; m</code>, so the whole condition is "
+   "true for every input and the guard rejects nothing. It crashed.</p>"
+   "<p>The same substitution appears twice more. "
+   "<code>maximize-active-section-with-trade-ii</code> bailed out when "
+   "<code>left.counts.size() &lt;= 2 || right.counts.size() &lt;= 2</code>, refusing a "
+   "valid merge whenever <em>either</em> side was short. "
+   "<code>kth-largest-element-in-a-stream</code> carried the same OR-for-AND "
+   "short-circuit through two submissions; the second only tightened "
+   "<code>&gt;</code> to <code>&gt;=</code> and left the operator alone.</p>"
+   "<p>Write grid guards with the halves parenthesised -- "
+   "<code>(x &gt;= 0 &amp;&amp; x &lt; m) &amp;&amp; (y &gt;= 0 &amp;&amp; y &lt; n)</code> "
+   "-- or better, write the guard once as a helper and never write it again.</p>"),
+  ("Bound the loop by the space it walks",
+   "<p>When a loop walks something other than the array it was born from, the array's "
+   "length stops being the right bound and nothing in the code says so.</p>"
+   "<p><code>count-the-number-of-k-free-subsets</code> walks residue classes over the "
+   "<em>value</em> space with <code>for (int j = i; j &lt; n; j += k)</code>, where "
+   "<code>n</code> is the element count. Values at or above <code>n</code> were "
+   "silently skipped; the fix was <code>j &lt;= maxEl</code>. "
+   "<code>sequential-digits</code> ran its digit-count loop up to a bound that can "
+   "reach 10, generating a garbage 10-digit candidate when no such number exists -- "
+   "capped with <code>Math.min(9, dCountHigh)</code>. "
+   "<code>adjacent-increasing-subarrays-detection-i</code> wrote "
+   "<code>for (int j = i; j &lt; j + k; j++)</code>, comparing <code>j</code> against "
+   "itself plus <code>k</code>, which reduces to the constant <code>0 &lt; k</code> -- "
+   "always true, bound never enforced.</p>"
+   "<p>Name the bound after the space: <code>maxValue</code>, <code>digitCount</code>, "
+   "<code>rows</code>. A bound called <code>n</code> in a loop that is not walking "
+   "<code>n</code> things is where this hides.</p>"),
+  ("The five-second check",
+   "<p>Run every new loop at <code>n = 1</code> and <code>n = 2</code> in your head "
+   "before you submit. Not the algorithm -- just the bound. What is the first index "
+   "touched, what is the last, and is the last one you wanted?</p>"
+   "<p>That check catches every example in this lesson. "
+   "<code>maximum-linear-stock-score</code> looped to "
+   "<code>prices.length - 1</code>, dropping the final price: visible at "
+   "<code>n = 2</code>. <code>alternating-groups-ii</code> iterated to "
+   "<code>i &lt; n + k</code>, one past the last valid start: visible at the smallest "
+   "case. <code>reverse-string</code>'s extra midpoint swap: visible at "
+   "<code>n = 2</code>.</p>"
+   "<p>These are not hard bugs. They are unchecked ones, and the check is short "
+   "enough to always do.</p>"),
+ ],
+ "rules": [
+  "Half-open by default: `i < n`. Every `<=` is a claim you should be able to defend in a phrase.",
+  "A range test is two comparisons joined by `&&`. An `||` between them is true for every input.",
+  "Bound the loop by the space it walks, and name the bound after that space.",
+  "Check every new loop at n = 1 and n = 2 before submitting.",
+ ],
+ "drill": "Take the four problems where a bound cost you the most -- `reverse-string`, "
+          "`total-cost-to-hire-k-workers`, `alternating-groups-ii` and "
+          "`adjacent-increasing-subarrays-detection-i` -- and for each, write down the "
+          "first and last index the loop touches before running anything. Then run it. "
+          "The gap between the two answers is the lesson.",
 },
 
 ]
@@ -5958,6 +6438,115 @@ LESSON_EXTRAS = {
  ],
 },
 
+
+"post-solve-regression": {
+ "objectives": [
+  "Keep the accepted version as an oracle and diff a rewrite against it on random "
+  "small inputs before submitting.",
+  "Limit a post-solve submission to one change -- structure, language or algorithm -- "
+  "so a failure names its cause.",
+  "Recognise the second consecutive rewrite failure as the moment to roll back rather "
+  "than patch.",
+ ],
+ "prereqs": ["complexity-budget", "edit-hygiene"],
+ "recall": [
+  ("You are about to rewrite an already-Accepted solution for speed. What do you have "
+   "that you do not have on an unsolved problem?",
+   "An oracle. The accepted version is known-correct on this exact problem, so the "
+   "rewrite can be checked by comparison instead of by reasoning -- a few hundred "
+   "small random inputs through both, outputs compared."),
+  ("Why are post-solve mistakes invisible in your statistics?",
+   "They cost no solve rate and appear in no first-attempt metric -- the problem is "
+   "already green. Nothing on the scoreboard ever reported them, which is why they "
+   "became the largest single slice of the diagnosed mistakes in the export."),
+  ("A rewrite has now failed twice in a row. What is the move?",
+   "Roll back to the accepted version and restart the change from it, one step at a "
+   "time. Patching a broken rewrite is how three attempts become seven -- "
+   "`reconstruct-itinerary` spent four attempts refining a strategy that was then "
+   "abandoned wholesale."),
+ ],
+},
+
+"derive-dont-guess": {
+ "objectives": [
+  "State the meaning of every constant in a solution in one phrase, and treat one you "
+  "cannot state as a bug.",
+  "Diagnose an answer that is wrong by a fixed amount as a double-count rather than "
+  "cancelling it with a compensating term.",
+  "Stop after three attempts of the same shape and derive on paper instead.",
+ ],
+ "prereqs": ["complexity-budget", "edit-hygiene"],
+ "recall": [
+  ("Your answer is consistently one too high. What does that tell you, and what is the "
+   "wrong response?",
+   "A fixed offset means something specific is counted exactly once too often, and "
+   "that is findable. The wrong response is `return result + 1` -- on "
+   "`max-points-on-a-line` the real cause was the pivot point sitting in its own angle "
+   "map, and excluding it removes the need for any constant."),
+  ("How do you choose the scan bound for `first-missing-positive`?",
+   "From the statement: among `n` integers the smallest missing positive cannot exceed "
+   "`n + 1`, so the bound is `nums.length + 1`. A literal like `10001` came from a "
+   "failing test, fits that test, and says nothing about the problem."),
+  ("What is the exit condition for guess-and-check?",
+   "Three attempts of the same shape. Trying things to build intuition is legitimate; "
+   "having no stopping rule is what turned `trapping-rain-water` into seven attempts "
+   "of wall-detection bookkeeping that never converged."),
+ ],
+},
+
+"read-the-statement": {
+ "objectives": [
+  "Write the output contract -- type, indexing base, distinctness, ordering, exact "
+  "string format -- before writing any code.",
+  "Port a signature deliberately when moving a solution to another language.",
+  "Identify the exact quantity the statement asks for and check the code computes that "
+  "one.",
+ ],
+ "prereqs": ["degenerate-inputs", "edit-hygiene"],
+ "recall": [
+  ("Your algorithm is right, your code matches your intent, and the judge says Wrong "
+   "Answer. Where do you look first?",
+   "The output contract, not the algorithm. Indexing base, duplicates, ordering and "
+   "string format are stated in the problem and appear nowhere in your logic -- "
+   "re-reading the code cannot reveal them, because the code says what you meant."),
+  ("What breaks first when you port a working solution to another language?",
+   "The call convention. `stone-game-ii` produced three consecutive Runtime Errors on "
+   "nothing else: a missing `class Solution` wrapper, then a missing `self`, then a "
+   "missing `self` again with the type hints removed."),
+  ("The problem says the result must be distinct and yours has repeats. What is the "
+   "bug?",
+   "The collection type. On `find-the-difference-of-two-arrays` the differences were "
+   "collected into a `List`, so a value appearing twice in the input appeared twice in "
+   "the output; a `Set` fixes it, and nothing in the loop was ever wrong."),
+ ],
+},
+
+"loop-bounds": {
+ "objectives": [
+  "Default to half-open ranges and justify every closed one in a phrase.",
+  "Write range tests as comparisons joined by `&&`, and recognise an `||` between them "
+  "as a guard that rejects nothing.",
+  "Check every new loop at n = 1 and n = 2 before submitting.",
+ ],
+ "prereqs": ["bounds", "binary-search", "wrong-name"],
+ "recall": [
+  ("What is wrong with `if (newX >= 0 || newX < m && newY >= 0 || newY < n)`?",
+   "Every integer satisfies `newX >= 0` or `newX < m`, so the condition is true for "
+   "every input and the guard rejects nothing. A range test is two comparisons joined "
+   "by `&&`: `(x >= 0 && x < m) && (y >= 0 && y < n)`."),
+  ("Your loop is `for (int j = i; j < n; j += k)` and it walks values, not positions. "
+   "What is the bug?",
+   "`n` is the element count, not the largest value, so every value at or above `n` is "
+   "skipped. Bound the loop by the space it walks -- `j <= maxEl` -- and name the "
+   "bound after that space."),
+  ("The cheapest check that catches most bound errors.",
+   "Run the loop at n = 1 and n = 2 in your head: first index touched, last index "
+   "touched, is the last one you wanted? That alone catches the extra midpoint swap in "
+   "`reverse-string` and the dropped final element in "
+   "`maximum-linear-stock-score`."),
+ ],
+},
+
 }
 
 # Merge, and fail loudly rather than rendering a lesson with no objectives.
@@ -5980,6 +6569,8 @@ KEY_RULE = {
  "dynamic-programming": 0, "monotonic-stack": 1, "strings": 0,
  "number-theory": 2, "intervals": 2, "linked-list": 0, "mutable-state": 3,
  "wrong-name": 1, "edit-hygiene": 0,
+ "post-solve-regression": 0, "derive-dont-guess": 0,
+ "read-the-statement": 0, "loop-bounds": 0,
 }
 
 assert set(KEY_RULE) == {l["slug"] for l in LESSONS}
