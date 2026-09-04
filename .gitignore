@@ -1,8 +1,20 @@
-# Exported data: contains a live browser login session. Never commit.
-leetcode_export/
+# Exported data: solutions, findings, the built book, and .browser_profile/,
+# which holds a live browser login session. Never commit any of it.
+# Excluding the contents rather than the directory itself, because git will
+# not descend into an excluded directory and the negations below would be
+# silently ignored.
+leetcode_export/*
+
+# ...except the generator, which is source, not data. It reads the export and
+# writes book/; it contains none of it.
+!leetcode_export/*.py
+!leetcode_export/prompt.md
 
 # Python
 __pycache__/
 *.py[cod]
 .venv/
 venv/
+
+# macOS
+.DS_Store
