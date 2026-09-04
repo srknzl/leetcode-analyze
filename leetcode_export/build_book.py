@@ -659,7 +659,7 @@ def render_search(chapters: list[Chapter], lessons: list[dict],
     records: list[tuple[str, str, str, str]] = []  # kind, url, title, context
     for name, title, note in (
             ("index.html", "All topics", "the front page, ranked by priority"),
-            ("course.html", "The mini course", "27 lessons in order"),
+            ("course.html", "The mini course", f"{len(lessons)} lessons in order"),
             ("schedule.html", "The practice schedule", "sessions of three problems"),
             ("checklist.html", "The pre-submit checklist", "one page, printable"),
             ("drills.html", "Spot the bug", "drills from your own submissions"),
@@ -670,7 +670,9 @@ def render_search(chapters: list[Chapter], lessons: list[dict],
             ("trend.html", "Month by month", "the whole history"),
             ("techniques.html", "Techniques you skipped", ""),
             ("revision.html", "Revision", "problems worth a second look"),
-            ("unsolved.html", "Never solved", "")):
+            ("unsolved.html", "Never solved", ""),
+            ("not-covered.html", "What this book does not cover",
+             "the diagnoses no lesson reaches")):
         records.append(("page", name, title, note))
     for lesson in lessons:
         records.append(("lesson", f"course-{lesson['slug']}.html", lesson["title"],
@@ -2013,14 +2015,158 @@ def history_cell(slug: str, known: dict[str, dict]) -> tuple[str, str]:
     return f"solved on attempt {attempts}", "mid"
 
 
+def schedule_sessions(lessons: list[dict], evidence: dict[str, list],
+                      chapters: list[Chapter]) -> list[dict]:
+    """The practice schedule as data, before it is a page.
+
+    The HTML schedule, the calendar file and the flashcard deck are three
+    renderings of one plan. Building the plan once means a problem cannot
+    appear in the page and be missing from the calendar.
+    """
+    known = problem_index(chapters)
+    sessions = []
+    for rank, lesson in enumerate(lessons, 1):
+        slugs, from_drill = practice_problems(lesson, evidence[lesson["slug"]], known)
+        for start in range(0, len(slugs), SESSION_SIZE):
+            problems = []
+            for slug in slugs[start:start + SESSION_SIZE]:
+                found = known.get(slug) or CATALOG.get(slug) or {}
+                problems.append({
+                    "slug": slug,
+                    "title": found.get("title") or slug_to_title(slug),
+                    "difficulty": found.get("difficulty") or "",
+                    "topic": found.get("topic") or "",
+                })
+            sessions.append({"number": len(sessions) + 1, "lesson": lesson,
+                             "rank": rank, "problems": problems,
+                             "first": start == 0, "from_drill": from_drill})
+    return sessions
+
+
+# Offsets in days for the revisit columns on the schedule page, in the same
+# order. The page prints the words; the calendar has to know the numbers.
+SPACING_DAYS = [1, 7, 30]
+
+
+def ics_escape(text: str) -> str:
+    """RFC 5545 TEXT escaping: backslash, semicolon, comma, newline."""
+    return (text.replace("\\", "\\\\").replace(";", "\\;")
+                .replace(",", "\\,").replace("\n", "\\n"))
+
+
+def ics_fold(line: str) -> str:
+    """Fold to 75 octets, continuations prefixed with one space (RFC 5545).
+
+    Folding is by octet, not character, so the split is done on the encoded
+    bytes and never inside a multi-byte sequence.
+    """
+    raw = line.encode("utf-8")
+    if len(raw) <= 75:
+        return line
+
+    def take(source: bytes, limit: int) -> bytes:
+        """The longest prefix within `limit` octets that is whole characters.
+
+        Trimming trailing continuation bytes is not enough: a cut can also land
+        immediately after a lead byte, which is not a continuation byte and
+        would survive that test. Decoding is the only honest predicate.
+        """
+        chunk = source[:limit]
+        while chunk:
+            try:
+                chunk.decode("utf-8")
+                return chunk
+            except UnicodeDecodeError:
+                chunk = chunk[:-1]
+        return chunk
+
+    out, first = [], take(raw, 75)
+    out.append(first.decode("utf-8"))
+    rest = raw[len(first):]
+    while rest:
+        chunk = take(rest, 74)          # 74, because the space counts too
+        out.append(" " + chunk.decode("utf-8"))
+        rest = rest[len(chunk):]
+    return "\r\n".join(out)
+
+
+def render_calendar(sessions: list[dict], start: datetime.date) -> str:
+    """The schedule as an .ics: one all-day event per session, then its revisits.
+
+    A schedule on a page is a page you have to remember to open. The same plan
+    in a calendar arrives on its own, which is the entire difference between a
+    plan you follow and a plan you wrote.
+    """
+    lines = ["BEGIN:VCALENDAR", "VERSION:2.0",
+             "PRODID:-//leetcode-analyze//Improvement Book//EN",
+             "CALSCALE:GREGORIAN", "METHOD:PUBLISH",
+             "X-WR-CALNAME:Improvement Book practice"]
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+    def event(uid: str, day: datetime.date, title: str, body: str) -> None:
+        lines.extend(ics_fold(text) for text in (
+            "BEGIN:VEVENT",
+            f"UID:{uid}@improvement-book.local",
+            f"DTSTAMP:{stamp}",
+            f"DTSTART;VALUE=DATE:{day:%Y%m%d}",
+            f"DTEND;VALUE=DATE:{day + datetime.timedelta(days=1):%Y%m%d}",
+            f"SUMMARY:{ics_escape(title)}",
+            f"DESCRIPTION:{ics_escape(body)}",
+            "TRANSP:TRANSPARENT",
+            "END:VEVENT"))
+
+    for offset, session in enumerate(sessions):
+        day = start + datetime.timedelta(days=offset)
+        lesson = session["lesson"]
+        listing = "\n".join(
+            f"- {p['title']}"
+            + (f" ({p['difficulty']})" if p["difficulty"] else "")
+            + f"\n  https://leetcode.com/problems/{p['slug']}/"
+            for p in session["problems"])
+        body = (f"Lesson {session['rank']}: {lesson['title']}\n\n"
+                f"{lesson['key_rule']}\n\n{listing}\n\n"
+                f"Drill: {re.sub(r'<[^>]+>', '', esc_code(lesson['drill']))}")
+        event(f"session-{session['number']}", day,
+              f"Practice {session['number']}: {lesson['title']}", body)
+        for gap, when in zip(SPACING_DAYS, SPACING):
+            event(f"session-{session['number']}-r{gap}",
+                  day + datetime.timedelta(days=gap),
+                  f"Revisit {session['number']} ({when})",
+                  "Re-solve from scratch, no notes:\n" + listing)
+
+    lines.append("END:VCALENDAR")
+    return "\r\n".join(lines) + "\r\n"
+
+
+def render_anki(lessons: list[dict]) -> str:
+    """Every recall question as a tab-separated Anki deck.
+
+    The questions already exist -- each lesson opens with them, asked before
+    the explanation. On the page they are read once. In a deck they are asked
+    again in a month, which is the only version of them that does anything.
+    """
+    rows = ["#separator:tab", "#html:true", "#tags column:3"]
+    for lesson in lessons:
+        tag = "improvement-book::" + lesson["slug"]
+        for question, answer in lesson["recall"]:
+            rows.append("\t".join(
+                (esc_code(question).replace("\t", " "),
+                 esc_code(answer).replace("\t", " "), tag)))
+        rows.append("\t".join(
+            (f"Key rule &mdash; {esc(lesson['title'])}",
+             esc_code(lesson["key_rule"]).replace("\t", " "), tag)))
+    return "\n".join(rows) + "\n"
+
+
 def render_schedule(lessons: list[dict], evidence: dict[str, list],
                     chapters: list[Chapter]) -> str:
     known = problem_index(chapters)
+    plan = schedule_sessions(lessons, evidence, chapters)
     sessions, rows_total, new_count = [], 0, 0
-    number = 0
-    for rank, lesson in enumerate(lessons, 1):
-        slugs, from_drill = practice_problems(lesson, evidence[lesson["slug"]], known)
-        source = ("" if from_drill >= len(slugs) else
+    for session in plan:
+        lesson, from_drill = session["lesson"], session["from_drill"]
+        total_here = len(session["problems"])
+        source = ("" if from_drill >= total_here else
                   '<p class="hint src">The drill above is an exercise rather than '
                   "a problem list, so this session is filled with the problems in "
                   "your own export that this lesson covers, worst first.</p>"
@@ -2030,30 +2176,26 @@ def render_schedule(lessons: list[dict], evidence: dict[str, list],
                      if from_drill == 1 else
                      f"The first {from_drill} problems here are named in the drill")
                   + "; the rest are from your own export.</p>")
-        for start in range(0, len(slugs), SESSION_SIZE):
-            chunk = slugs[start:start + SESSION_SIZE]
-            number += 1
-            rows = []
-            for slug in chunk:
-                problem = known.get(slug) or CATALOG.get(slug) or {}
-                title = problem.get("title") or slug_to_title(slug)
-                where = (f'<a href="{esc(problem["topic"])}.html#{esc(slug)}">'
-                         f"{esc(title)}</a>" if problem.get("topic") else
-                         f'<a href="https://leetcode.com/problems/{esc(slug)}/" '
-                         f'target="_blank" rel="noopener">{esc(title)}</a>')
-                text, tone = history_cell(slug, known)
-                new_count += tone == "new"
-                rows_total += 1
-                rows.append(f"<tr><td>{where}</td>"
-                            f'<td>{esc(problem.get("difficulty") or "&mdash;")}</td>'
-                            f'<td class="hist {tone}">{text}</td>'
-                            + "".join('<td class="tick"></td>' for _ in SPACING)
-                            + "</tr>")
-            sessions.append(f"""<section class="session">
-<h2><span class="num">{number}</span>{esc(lesson['title'])}</h2>
-<p class="hint"><a href="course-{esc(lesson['slug'])}.html">Lesson {rank}</a>
+        rows = []
+        for problem in session["problems"]:
+            slug = problem["slug"]
+            where = (f'<a href="{esc(problem["topic"])}.html#{esc(slug)}">'
+                     f'{esc(problem["title"])}</a>' if problem["topic"] else
+                     f'<a href="https://leetcode.com/problems/{esc(slug)}/" '
+                     f'target="_blank" rel="noopener">{esc(problem["title"])}</a>')
+            text, tone = history_cell(slug, known)
+            new_count += tone == "new"
+            rows_total += 1
+            rows.append(f"<tr><td>{where}</td>"
+                        f'<td>{esc(problem["difficulty"] or "&mdash;")}</td>'
+                        f'<td class="hist {tone}">{text}</td>'
+                        + "".join('<td class="tick"></td>' for _ in SPACING)
+                        + "</tr>")
+        sessions.append(f"""<section class="session">
+<h2><span class="num">{session['number']}</span>{esc(lesson['title'])}</h2>
+<p class="hint"><a href="course-{esc(lesson['slug'])}.html">Lesson {session['rank']}</a>
 &middot; <a href="drill-{esc(lesson['slug'])}.html">its spot-the-bug set</a>
-&middot; {esc_code(lesson['drill'])}</p>{source if start == 0 else ""}
+&middot; {esc_code(lesson['drill'])}</p>{source if session['first'] else ""}
 <div class="table-scroll"><table class="lesson-table sched">
 <thead><tr><th>Problem</th><th>Difficulty</th><th>Your record</th>
 {''.join(f'<th>{esc(when)}</th>' for when in SPACING)}</tr></thead>
@@ -2077,6 +2219,11 @@ not learned &mdash; tick it {esc(SPACING[0])}, {esc(SPACING[1])} and
 {esc(SPACING[2])}, and only then call it done.</p>
 <p class="also">Print this page. It is designed to be marked with a pen, and
 the browser will drop the navigation and expand everything on the way out.</p>
+<p class="also">Or take it with you: <a href="schedule.ics"
+download>schedule.ics</a> puts every session and its three revisits in your
+calendar, one session a day from the day you import it, and
+<a href="recall.tsv" download>recall.tsv</a> is every lesson&rsquo;s recall
+questions as an Anki deck (File &rarr; Import, tab-separated).</p>
 </header>
 {''.join(sessions)}
 <nav class="crumb bottom"><a href="course.html">The course</a> &middot;
@@ -2843,6 +2990,107 @@ habit.</p>
     return page("Every mistake -- Improvement Book", body)
 
 
+COVERAGE_FLOOR = 0.85
+
+
+def uncovered(chapters: list[Chapter],
+              lessons: list[dict]) -> tuple[list[tuple], list[tuple]]:
+    """Diagnosed evidence that no lesson's match pattern reaches.
+
+    The same join the lessons themselves use, inverted. Keeping it in one
+    function means the "not covered" page can never disagree with the coverage
+    the build reports: both are this predicate.
+    """
+    patterns = [re.compile(lesson["match"], re.I) for lesson in lessons]
+    taught = lambda text: any(pattern.search(text) for pattern in patterns)
+    mistakes, smells = [], []
+    for chapter in chapters:
+        for case in chapter.cases:
+            for mistake in case.order_mistakes():
+                text = " ".join(str(mistake.get(k) or "")
+                                for k in ("what_went_wrong", "how_it_was_fixed"))
+                if not taught(text):
+                    mistakes.append((chapter, case, mistake))
+            for smell in case.smells:
+                if not taught(smell.get("smell", "")):
+                    smells.append((chapter, case, smell))
+    return mistakes, smells
+
+
+def render_not_covered(chapters: list[Chapter], lessons: list[dict],
+                       total_m: int, total_s: int) -> str:
+    """What the course does not teach, listed rather than left implied.
+
+    A book assembled from your own data can imply, by saying nothing, that it
+    covers all of it. It does not: these are the diagnoses no lesson reaches.
+    Most are genuinely one-offs. Some are the next lessons, and the only way to
+    tell which is to read them, so the page lists every one rather than
+    reporting the count and moving on.
+    """
+    mistakes, smells = uncovered(chapters, lessons)
+    by_topic: dict[str, list] = defaultdict(list)
+    for chapter, case, mistake in mistakes:
+        by_topic[chapter.name].append((case, mistake, "mistake"))
+    for chapter, case, smell in smells:
+        by_topic[chapter.name].append((case, smell, "habit"))
+
+    groups = []
+    for name in sorted(by_topic, key=lambda n: (-len(by_topic[n]), n)):
+        rows = "\n".join(
+            '<tr><td><a href="problem-{}.html">{}</a></td>'
+            '<td><span class="status {}">{}</span></td>'
+            '<td>{}</td></tr>'.format(
+                esc(case.slug), esc(case.title),
+                "mid" if kind == "mistake" else "low", kind,
+                esc_code(item.get("what_went_wrong") or item.get("smell")))
+            for case, item, kind in by_topic[name])
+        groups.append(
+            '<section class="uncovered-topic">\n'
+            '<h2>{} <span class="badge">{}</span></h2>\n'
+            '<div class="table-scroll"><table class="all-mistakes">\n'
+            '<tr><th>Problem</th><th>Kind</th><th>What the analysis found</th></tr>\n'
+            '{}\n</table></div>\n</section>'.format(
+                esc(name), len(by_topic[name]), rows))
+
+    reached_m, reached_s = total_m - len(mistakes), total_s - len(smells)
+    share = (reached_m + reached_s) / (total_m + total_s)
+    body = f"""<nav class="crumb"><a href="index.html">&larr; All topics</a> &middot;
+<a href="course.html">Course</a> &middot;
+<a href="mistakes.html">Every mistake</a></nav>
+<header class="chapter-head">
+<p class="eyebrow">The honest appendix</p>
+<h1>What this book does not cover</h1>
+<p class="lede">The {plural(len(lessons), 'lesson')} in the course reach
+{reached_m} of {total_m} diagnosed mistakes and {reached_s} of {total_s}
+habits. This page is the remainder: {len(mistakes)} mistakes and {len(smells)}
+habits that no lesson claims.</p>
+<p class="badges">
+<span class="badge good">{share:.0%} covered</span>
+<span class="badge warn">{len(mistakes) + len(smells)} not covered</span>
+<span class="badge">{plural(len(by_topic), 'topic')}</span></p>
+</header>
+<section class="breakdown">
+<h2>Why they are here</h2>
+<p>Three different reasons, and this page does not guess which applies to
+which &mdash; that is what reading them is for.</p>
+<p><strong>Genuinely one-off.</strong> A constraint misread on exactly one
+problem, a library method that surprised you once. There is nothing to
+generalise, and a lesson built on a single point would be inventing a pattern
+rather than finding one.</p>
+<p><strong>Covered in substance, not in wording.</strong> A lesson teaches the
+idea, but its match pattern does not reach this phrasing. These cost nothing
+except an understated coverage number.</p>
+<p><strong>The next lessons.</strong> A cluster big enough to teach that nobody
+has written yet. Four of the lessons in this course began as rows on a page
+like this one. If you read down a topic below and the same shape appears three
+times, that is the next lesson.</p>
+</section>
+{"".join(groups)}
+<nav class="crumb bottom"><a href="index.html">&larr; All topics</a> &middot;
+<a href="course.html">The course</a></nav>"""
+    return page("What this book does not cover -- Improvement Book", body)
+
+
 def is_thin(chapter: Chapter) -> bool:
     """A chapter with nothing much in it.
 
@@ -2973,6 +3221,8 @@ book uses it.</li>
 <li><a href="revision.html">What to revise</a> &middot;
 <a href="unsolved.html">never solved</a> &middot;
 <a href="grinds.html">the twenty longest grinds</a></li>
+<li><a href="not-covered.html">What this book does not cover</a> &mdash; the
+diagnoses no lesson reaches, listed rather than left implied.</li>
 <li><a href="techniques.html">Techniques you have not used</a> &middot;
 <a href="trend.html">activity over time</a></li>
 <li>The ranked topics below, and a page per problem behind each one.</li>
@@ -3510,6 +3760,11 @@ def main() -> None:
         render_plan(chapters), encoding="utf-8")
     (BOOK / "unsolved.html").write_text(
         render_unsolved(chapters), encoding="utf-8")
+    (BOOK / "not-covered.html").write_text(
+        render_not_covered(chapters, lessons,
+                           sum(c.mistake_count for c in chapters),
+                           sum(len(case.smells) for c in chapters
+                               for case in c.cases)), encoding="utf-8")
     (BOOK / "revision.html").write_text(
         render_revision(chapters, overview), encoding="utf-8")
     (BOOK / "techniques.html").write_text(
@@ -3542,6 +3797,11 @@ def main() -> None:
 
     (BOOK / "schedule.html").write_text(
         render_schedule(lessons, evidence, chapters), encoding="utf-8")
+    plan = schedule_sessions(lessons, evidence, chapters)
+    (BOOK / "schedule.ics").write_text(
+        render_calendar(plan, datetime.date.today() + datetime.timedelta(days=1)),
+        encoding="utf-8", newline="")
+    (BOOK / "recall.tsv").write_text(render_anki(lessons), encoding="utf-8")
     (BOOK / "checklist.html").write_text(
         render_checklist(lessons, evidence, habits), encoding="utf-8")
     (BOOK / "process.html").write_text(
@@ -3615,6 +3875,10 @@ def main() -> None:
     for tech in synthesis.TECHNIQUES:
         found = technique_notes(by_slug[tech["topic"]], tech["evidence"])
         assert found, f"{tech['topic']}: evidence pattern quotes no analysis note"
+    share = (len(hit_m) + len(hit_s)) / (len(all_m) + len(all_s))
+    assert share >= COVERAGE_FLOOR, (
+        f"evidence reaching a lesson fell to {share:.1%}, below the "
+        f"{COVERAGE_FLOOR:.0%} floor -- a match pattern stopped matching")
     print(f"evidence: {len(hit_m)}/{len(all_m)} mistakes "
           f"({len(hit_m) / len(all_m):.0%}) and {len(hit_s)}/{len(all_s)} habits "
           f"({len(hit_s) / len(all_s):.0%}) reach a lesson")
@@ -3734,6 +3998,20 @@ def _selfcheck() -> None:
         for part in ("summary", "uses", "patterns", "depth", "mistakes",
                      "fixes", "habits", "drill"):
             assert f'id="{part}"' in html, (lesson["slug"], f"no {part} section")
+
+    # Folding is by octet and must never split a multi-byte character, which is
+    # the one way to write an .ics that parses everywhere except on the entry
+    # that happens to carry an em-dash.
+    assert ics_escape(";") == r"\;" and ics_escape(",") == r"\,"
+    assert ics_escape("\n") == r"\n" and ics_escape("\\") == "\\\\"
+    assert ics_fold("x" * 75) == "x" * 75
+    for probe in ("x" * 200, "é" * 200, "x" * 74 + "é" * 60, "SUMMARY:" + "√" * 90):
+        folded = ics_fold(probe)
+        for line in folded.split("\r\n"):
+            assert len(line.encode("utf-8")) <= 75, (probe[:8], len(line))
+            line.encode("utf-8").decode("utf-8")
+        assert folded.replace("\r\n ", "") == probe, "unfolding must round-trip"
+    print(f"  ics: escaping and 75-octet folding round-trip on 4 probes")
 
     # The glossary linker walks raw HTML by hand, so it gets a unit check.
     assert glossary_links("<p>a heap here</p>").count("<a") == 1

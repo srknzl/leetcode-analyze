@@ -5729,10 +5729,10 @@ for (int i = 0; i < half; i++) pq.poll();
   ("The answer is right except at one end",
    "The bound, not the body. Check the first and last iterations by hand."),
   ("A bounds check that never seems to reject anything",
-   "Look for `||` where the range needs `&&`. It is true for every input and silently does nothing."),
+   "Look for a range test joined by OR where it needs AND. It is true for every input and silently does nothing."),
   ("Equal elements behave like unequal ones",
-   "The comparison's strictness is the bug: `<` where `<=` was meant, or the reverse."),
-  ("A loop guard using `<` when the range is inclusive",
+   "The comparison's strictness is the bug: strict where it should be inclusive, or the reverse."),
+  ("A strict loop guard on a range that is inclusive",
    "The last candidate is never considered. This is the single most common shape here."),
  ],
  "match": r"off.by.one|loop (bound|condition|guard|termination)|"
