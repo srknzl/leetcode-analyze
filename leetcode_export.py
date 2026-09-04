@@ -1403,7 +1403,16 @@ session can pick up where the last one stopped.
      them as first-solve effort.
    - Ignore problems with a non-zero `suspect_pasted_attempts` when judging how
      I think: that code may not be mine.
-4. Write `findings/<topic>.json` before moving on, so the work survives:
+4. Write `findings/<topic>.json` before moving on, so the work survives.
+   Every `file` you cite must be copied exactly from the bundle -- a single
+   wrong digit still looks like a real submission and points at nothing. When
+   the bundle is written, run
+
+   ```
+   python3 leetcode_export.py --check-findings
+   ```
+
+   and fix anything it reports before starting the next one. The JSON shape is:
 
    ```json
    {
@@ -1708,10 +1717,98 @@ def rebuild(outdir: Path, state: dict | None = None, catalog: dict | None = None
 
 
 # --------------------------------------------------------------------------
+# Findings validation
+# --------------------------------------------------------------------------
+
+def check_findings(outdir: Path) -> int:
+    """Every `file` an analysis cites must be a submission that exists.
+
+    The analysis reads paths out of a review bundle and retypes them into
+    findings/. A single transcribed digit produces a path that is still
+    well-formed -- right problem, plausible timestamp and id -- and so survives
+    unnoticed all the way into the book, where it points at nothing. Nothing
+    downstream can repair one either: the timestamp and the id are independent
+    fields, and when they disagree only the diagnosis itself says which half is
+    the typo. So catch it here, while the analysis that wrote it is still
+    running and can look again at the file it meant."""
+    findings = sorted((outdir / "findings").glob("*.json"))
+    if not findings:
+        log("No findings/*.json yet -- nothing to check.")
+        return 0
+
+    bad, cited = [], 0
+    for path in findings:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            bad.append((path.name, "", f"file is not valid JSON: {exc}"))
+            continue
+        for key, entries in sorted(data.items()):
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict) or "file" not in entry:
+                    continue
+                cited += 1
+                named = str(entry["file"])
+                if (outdir / named).is_file():
+                    continue
+                # Name the real submissions for that problem, so whoever fixes
+                # this is choosing from the actual candidates rather than
+                # guessing at another path.
+                folder = outdir / Path(named).parent
+                near = (sorted(f.name for f in folder.glob("*")
+                       if f.suffix != ".json") if folder.is_dir() else [])
+                hint = ("problem folder does not exist" if not near else
+                        "on disk: " + ", ".join(near))
+                bad.append((path.name, f"{key}: {named}", hint))
+
+    log(f"Checked {cited} cited files across {len(findings)} findings bundles.")
+    if not bad:
+        log("  every cited file exists.")
+        return 0
+
+    log(f"  {len(bad)} cited file(s) do not exist:")
+    for name, where, hint in bad:
+        log(f"    {name}  {where}")
+        log(f"      {hint}")
+    log("  Re-read the submission each diagnosis describes and correct the path.")
+    return 1
+
+
+# --------------------------------------------------------------------------
 # Offline self-check
 # --------------------------------------------------------------------------
 
+def _test_check_findings() -> None:
+    """A cited file that exists passes; one digit off does not."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp)
+        real = out / "solutions" / "two-sum" / "1700000000_Accepted_java_111.java"
+        real.parent.mkdir(parents=True)
+        real.write_text("class Solution {}", encoding="utf-8")
+        (out / "solutions" / "two-sum" / "attempts_summary.json").write_text("{}",
+                                                                            encoding="utf-8")
+        (out / "findings").mkdir()
+        cited = "solutions/two-sum/1700000000_Accepted_java_111.java"
+        bundle = out / "findings" / "arrays.json"
+
+        def write(path: str) -> None:
+            save_json(bundle, {"topic": "arrays",
+                               "mistakes": [{"problem": "two-sum", "file": path}],
+                               "style_notes": ["a list of plain strings is not a citation"]})
+
+        write(cited)
+        assert check_findings(out) == 0
+        write(cited.replace("_111.", "_112."))
+        assert check_findings(out) == 1
+        bundle.write_text("{not json", encoding="utf-8")
+        assert check_findings(out) == 1
+
+
 def self_test() -> None:
+    _test_check_findings()
     assert ext_for("python3") == "py" and ext_for("Python3") == "py"
     assert ext_for("mysql") == "sql" and ext_for("golang") == "go"
     assert ext_for("some-new-language") == "txt", "unknown languages must not crash"
@@ -1941,6 +2038,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="re-attempt everything in failed_submissions.json")
     parser.add_argument("--rebuild-analysis", action="store_true",
                         help="regenerate analysis_summary.json and prompt.md offline")
+    parser.add_argument("--check-findings", action="store_true",
+                        help="verify every file cited by findings/*.json exists")
     parser.add_argument("--self-test", action="store_true",
                         help="run offline assertions and exit")
     args = parser.parse_args(argv)
@@ -1951,6 +2050,9 @@ def main(argv: list[str] | None = None) -> int:
 
     outdir = args.outdir.expanduser().resolve()
     outdir.mkdir(parents=True, exist_ok=True)
+
+    if args.check_findings:
+        return check_findings(outdir)
 
     if args.rebuild_analysis:
         log(f"Rebuilding analysis in {outdir}")

@@ -6,7 +6,7 @@ Work through it as described below; everything you need is in this folder.
 
 ## 1. What this dataset is
 
-Exported by `leetcode_export.py` on 2026-09-02 19:31:23 UTC. It contains
+Exported by `leetcode_export.py` on 2026-09-04 17:42:56 UTC. It contains
 **every submission I made, at every status** -- not only the accepted ones.
 The failed attempts are deliberately included and are the most useful signal
 in here.
@@ -204,7 +204,16 @@ session can pick up where the last one stopped.
      them as first-solve effort.
    - Ignore problems with a non-zero `suspect_pasted_attempts` when judging how
      I think: that code may not be mine.
-4. Write `findings/<topic>.json` before moving on, so the work survives:
+4. Write `findings/<topic>.json` before moving on, so the work survives.
+   Every `file` you cite must be copied exactly from the bundle -- a single
+   wrong digit still looks like a real submission and points at nothing. When
+   the bundle is written, run
+
+   ```
+   python3 leetcode_export.py --check-findings
+   ```
+
+   and fix anything it reports before starting the next one. The JSON shape is:
 
    ```json
    {
