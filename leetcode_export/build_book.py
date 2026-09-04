@@ -2400,6 +2400,10 @@ JAVA_WRAPPERS = [
     "import java.util.*;\n{body}\n",
     "import java.util.*;\nclass {name}{{\n{body}\n}}\n",
     "import java.util.*;\nclass {name}{{ void method(){{\n{body}\n}} }}\n",
+    # A method body that returns something. Object takes any reference and
+    # boxes any primitive, so this wrapper asks "does the body type-check"
+    # without having to guess what the fragment returns.
+    "import java.util.*;\nclass {name}{{ Object method(){{\n{body}\n}} }}\n",
 ]
 
 
@@ -2426,8 +2430,136 @@ def java_blocks(lessons: list[dict]) -> tuple[list[tuple], int]:
     return checkable, illustrative
 
 
+# The names a LeetCode problem statement hands you, and the types they have
+# there. A sample reading `for (int i = 0; i < n; i++) sum += nums[i];` is
+# correct Java the moment `n` and `nums` exist -- they come from the sentence
+# above the block, not from the block. Declaring them is what lets javac check
+# the sample rather than stop at the context it cannot see. Nothing here is
+# guessed: the list is the symbols javac reported missing, with the type each
+# one carries everywhere it appears in the book.
+JAVA_SCALARS = {
+    "n": "int", "m": "int", "k": "int", "i": "int", "j": "int", "x": "int",
+    "y": "int", "l": "int", "r": "int", "lo": "int", "hi": "int", "mid": "int",
+    "count": "int", "best": "int", "ans": "int", "sum": "int", "max": "int",
+    "min": "int", "size": "int", "total": "int", "target": "int", "val": "int",
+    "rootX": "int", "rootY": "int", "iv": "int", "start": "int", "end": "int",
+    "MOD": "long", "result": "long", "point1": "int", "point2": "int",
+}
+JAVA_ARRAYS = {
+    "nums": "int", "dp": "int", "freq": "int", "counts": "int", "degree": "int",
+    "indegree": "int", "parent": "int", "rank": "int", "heights": "int",
+    "memo": "int", "a": "int", "b": "int", "src": "int", "arr": "int",
+    "grid": "int", "prices": "int", "used": "boolean", "seen": "boolean",
+    "visited": "boolean", "dist": "int", "digits": "int", "rows": "int",
+    "cols": "int", "temps": "int", "piles": "int", "factors": "int",
+    "exists": "boolean",
+}
+JAVA_OBJECTS = {
+    "s": 'String s = "abc"',
+    "t": 'String t = "abc"',
+    "word": 'String word = "abc"',
+    "sb": "StringBuilder sb = new StringBuilder()",
+    "head": "ListNode head = new ListNode(0)",
+    "node": "TreeNode node = new TreeNode(0)",
+    "root": "TreeNode root = new TreeNode(0)",
+    "adj": "List<List<Integer>> adj = new ArrayList<>()",
+    "st": "Deque<Integer> st = new ArrayDeque<>()",
+    "stack": "Deque<Integer> stack = new ArrayDeque<>()",
+    "pq": "PriorityQueue<Integer> pq = new PriorityQueue<>()",
+    "list": "List<Integer> list = new ArrayList<>()",
+    "map": "Map<Integer, Integer> map = new HashMap<>()",
+    "words": "String[] words = {}",
+    "next": "ListNode next = new ListNode(0)",
+    "current": "ListNode current = new ListNode(0)",
+    "queue": "Deque<Integer> queue = new ArrayDeque<>()",
+}
+JAVA_DIMS = 3
+JAVAC_FLOOR = 50
+
+
+def java_declaration(name: str, source: str) -> str:
+    """A declaration for `name` shaped by how this block uses it.
+
+    Only the dimension is read off the source, and only for arrays: a block
+    that writes `dp[i][j]` needs a two-dimensional `dp` and one that writes
+    `dp[i]` needs a one-dimensional one, and the same name is both in
+    different lessons. Everything else is fixed by the table.
+    """
+    if name in JAVA_OBJECTS:
+        return JAVA_OBJECTS[name]
+    subscripted = re.search(rf"\b{re.escape(name)}\s*\[", source)
+    if name in JAVA_ARRAYS or (subscripted and name in JAVA_SCALARS):
+        dims = 1
+        while dims < JAVA_DIMS and re.search(
+                rf"\b{re.escape(name)}\s*" + r"\[[^\]\n]*\]\s*" * dims + r"\[",
+                source):
+            dims += 1
+        element = JAVA_ARRAYS.get(name) or JAVA_SCALARS[name]
+        return (f"{element}{'[]' * dims} {name} = "
+                f"new {element}{'[8]' * dims}")
+    return f"{JAVA_SCALARS[name]} {name} = 0"
+
+
+def java_context(work: Path, wrapper: str, indices: list[int],
+                 blocks: list[tuple], context: dict[int, list[str]],
+                 banned: dict[int, set]) -> bool:
+    """Add declarations for the names javac just said were missing.
+
+    One round: compile, read every `symbol: variable x` back to the block that
+    raised it, and declare the ones the table knows. Returns whether anything
+    was added, so the caller can iterate -- resolving one name routinely
+    reveals the next, and stopping early leaves the sample unchecked.
+    """
+    files = [str(work / "LcNodes.java")]
+    work.joinpath("LcNodes.java").write_text(JAVA_NODES, encoding="utf-8")
+    for i in indices:
+        target = work / f"Block{i}.java"
+        target.write_text(wrapper.format(
+            name=f"Block{i}",
+            body="".join(f"{d};\n" for d in context.get(i, [])) + blocks[i][2]),
+            encoding="utf-8")
+        files.append(str(target))
+    result = subprocess.run(
+        ["javac", "-proc:none", "-nowarn", "-Xmaxerrs", "9999",
+         "-d", str(work / "out"), *files],
+        capture_output=True, text=True)
+    if result.returncode == 0:
+        return False
+
+    changed, current = False, None
+    for line in result.stderr.splitlines():
+        named = re.search(r"Block(\d+)\.java:\d+: error(?:: (.*))?", line)
+        if named:
+            current = int(named.group(1))
+            # The block declares this name itself, further down or in a scope
+            # javac reached later. Ours is the wrong one: withdraw it.
+            clash = re.match(r"variable (\w+) is already defined", named.group(2) or "")
+            if clash and current in context:
+                start = clash.group(1) + " "
+                kept = [d for d in context[current]
+                        if not d.split("=")[0].strip().endswith(" " + clash.group(1))]
+                if len(kept) != len(context[current]):
+                    context[current], changed = kept, True
+                banned.setdefault(current, set()).add(clash.group(1))
+            continue
+        symbol = re.match(r"\s*symbol:\s+variable\s+(\w+)\s*$", line)
+        if not symbol or current is None:
+            continue
+        name = symbol.group(1)
+        if name in banned.get(current, ()):
+            continue
+        if name not in JAVA_SCALARS and name not in JAVA_ARRAYS \
+                and name not in JAVA_OBJECTS:
+            continue
+        declaration = java_declaration(name, blocks[current][2])
+        if declaration not in context.setdefault(current, []):
+            context[current].append(declaration)
+            changed = True
+    return changed
+
+
 def _javac(work: Path, wrapper: str, indices: list[int], blocks: list[tuple],
-           flags: list[str]) -> list[int]:
+           flags: list[str], context: dict[int, list[str]] | None = None) -> list[int]:
     """Indices that javac accepts under this wrapper. Returns the survivors.
 
     javac works in phases across the whole batch, so one bad file can stop it
@@ -2441,8 +2573,10 @@ def _javac(work: Path, wrapper: str, indices: list[int], blocks: list[tuple],
         files = [str(work / "LcNodes.java")]
         for i in candidates:
             target = work / f"Block{i}.java"
-            target.write_text(wrapper.format(name=f"Block{i}", body=blocks[i][2]),
-                              encoding="utf-8")
+            declared = "".join(f"{d};\n" for d in (context or {}).get(i, []))
+            target.write_text(
+                wrapper.format(name=f"Block{i}", body=declared + blocks[i][2]),
+                encoding="utf-8")
             files.append(str(target))
         result = subprocess.run(
             ["javac", *flags, "-nowarn", "-Xmaxerrs", "9999",
@@ -2482,17 +2616,53 @@ def check_java(lessons: list[dict]) -> None:
         print(f"  javac: not on PATH -- {len(blocks)} samples NOT compiled")
         return
 
+    # Which wrapper each block parses under, first. Everything after this is
+    # per-wrapper: a block compiled under a wrapper it does not even parse
+    # under stops javac in the parser, and a batch that stops in the parser
+    # never reaches symbol resolution -- so the missing names, which are the
+    # whole point of the context pass, are never reported.
+    # Every wrapper is asked about every block, not just the ones no earlier
+    # wrapper claimed. Two independent facts are wanted per pair: does the
+    # block parse under this wrapper -- which is the assertion -- and does it
+    # type-check under it, which is the report. A block that parses under one
+    # wrapper and only compiles under another is common: a bare file of method
+    # declarations parses as a compact source file and then fails for having
+    # no main.
     parsed, compiled = set(), set()
+    fits: dict[int, list[int]] = defaultdict(list)
     with tempfile.TemporaryDirectory() as tmp:
         for attempt, wrapper in enumerate(JAVA_WRAPPERS):
-            for label, flags, done in (("parse", ["-proc:only"], parsed),
-                                       ("full", ["-proc:none"], compiled)):
-                todo = [i for i in range(len(blocks)) if i not in done]
-                if not todo:
-                    continue
-                work = Path(tmp) / f"{label}{attempt}"
+            work = Path(tmp) / f"parse{attempt}"
+            work.mkdir()
+            for i in _javac(work, wrapper, list(range(len(blocks))), blocks,
+                            ["-proc:only"]):
+                fits[attempt].append(i)
+                parsed.add(i)
+
+        done: set[int] = set()
+        for attempt, wrapper in enumerate(JAVA_WRAPPERS):
+            # Only blocks that parse under this wrapper: a batch that stops in
+            # the parser never reaches symbol resolution, and the missing names
+            # are the entire point of the context pass.
+            group = [i for i in fits[attempt] if i not in done]
+            if not group:
+                continue
+            # Each wrapper gets its own declarations: what `n` has to be under
+            # one is not what it has to be under another.
+            context, banned = {}, {}
+            # Resolving one name reveals the next, so iterate until a round
+            # changes nothing. The bound guards against a pathological block;
+            # convergence is two or three rounds.
+            for round_number in range(5):
+                work = Path(tmp) / f"ctx{attempt}-{round_number}"
                 work.mkdir()
-                done.update(_javac(work, wrapper, todo, blocks, flags))
+                if not java_context(work, wrapper, group, blocks, context, banned):
+                    break
+            work = Path(tmp) / f"full{attempt}"
+            work.mkdir()
+            passed = _javac(work, wrapper, group, blocks, ["-proc:none"], context)
+            compiled.update(passed)
+            done.update(passed)
 
     unparsed = [i for i in range(len(blocks)) if i not in parsed]
     if unparsed:
@@ -2503,6 +2673,13 @@ def check_java(lessons: list[dict]) -> None:
             f"{len(unparsed)} Java samples do not parse as a file, a class body "
             f"or a method body:\n{listed}\nFix them, or mark each one with "
             f"code(..., compiles=False) if it is deliberately not Java.")
+    # A ratchet, not a target. Every sample here is a deliberate fragment, so
+    # full compilation will never be universal -- but it went 20 -> 50 once the
+    # declarations the fragments assume were supplied, and a change that drops
+    # it back is a check that quietly stopped checking.
+    assert len(compiled) >= JAVAC_FLOOR, (
+        f"only {len(compiled)} of {len(blocks)} samples type-check, below the "
+        f"floor of {JAVAC_FLOOR} -- a wrapper or a declaration stopped working")
     print(f"  javac: {len(blocks)} samples parse, {len(compiled)} of them "
           f"type-check standing alone, {illustrative} marked as illustrations")
 

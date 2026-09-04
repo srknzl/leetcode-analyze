@@ -686,7 +686,7 @@ while (ans <= 50 && exists[ans]) ans++;
    + code("""
 if (head == nullptr && head->next == nullptr) return false;   // crashes on empty
 if (head == nullptr || head->next == nullptr) return false;   // guards
-""")
+""", compiles=False)   # quoted verbatim, and these two submissions were C++
    + p("From <em>linked-list-cycle</em>, both lines. The first survived two more "
        "submissions &mdash; one of which added a null check to the "
        "<em>other</em> pointer and left this one alone &mdash; before the operator "
