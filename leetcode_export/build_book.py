@@ -2240,8 +2240,10 @@ def render_schedule(lessons: list[dict], evidence: dict[str, list],
 <p class="eyebrow">Every lesson&rsquo;s drill, in one order</p>
 <h1>The practice schedule</h1>
 <p class="lede">{plural(len(sessions), 'session')} of {SESSION_SIZE} problems,
-{rows_total} in total, in course order &mdash; which is the order that stops the
-most bugs soonest. {plural(new_count, 'problem')} here you have never attempted;
+{rows_total} in total, in course order &mdash; each lesson after the ones it
+needs, which is what that order guarantees and all it guarantees. The tier on
+each lesson is the one that says what it still costs you.
+{plural(new_count, 'problem')} here you have never attempted;
 the rest carry what your own record says, so you can see at a glance whether a
 session is revision or new ground.</p>
 <p class="lede">The three empty columns are the spacing the report asks for.
@@ -2842,6 +2844,11 @@ def check_stylesheet() -> None:
     assert ".table-scroll{overflow-x:auto" in CSS, "wide tables would widen the page"
     assert ".lesson-table:not(.pairs){display:block;overflow-x:auto}" in CSS, (
         "an authored table would widen the page below 34rem")
+    assert ".thin-list li .muted{white-space:nowrap}" in CSS, (
+        "a long chapter name would widen the index at 320px")
+    assert "@media (pointer:coarse){" in CSS, "no touch target sizes"
+    assert ".lesson-toc{flex-wrap:nowrap" in CSS, (
+        "the sticky lesson contents would cover the section it scrolls to")
     print(f"  stylesheet: every token pair clears {CONTRAST_MIN}:1 in both "
           f"themes, tightest {worst[0]:.2f}:1 ({worst[1]}); focus ring, print "
           f"sheet and the narrow-screen rules all present")
@@ -3607,6 +3614,9 @@ CSS = """
 --muted:#a09a90;--line:#33313a;--accent:#e08b6f;--good:#6cc38d;--bad:#f08a78;
 --warn:#e0b95c;--code:#141318;}}
 *{box-sizing:border-box}
+/* Safari on a phone enlarges the text of a block it thinks is too
+   narrow, which breaks a type scale that was measured. Opt out. */
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
 /* Every code block scrolls inside itself. The figure and lesson variants set
    this again below; this is for the bare <pre> written straight into a lesson,
    which otherwise widens the whole page on a phone. */
@@ -3755,7 +3765,6 @@ max-width:44rem}
 letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
 .prereq{margin:.7rem 0 0;padding-top:.6rem;border-top:1px solid var(--line);
 font-size:.9rem}
-.prereq a{margin-right:.6rem}
 .recall{margin:0 0 1.6rem;padding:1rem 1.1rem;background:var(--code);
 border:1px solid var(--line);border-radius:8px;max-width:44rem}
 .recall ol{margin:.6rem 0 0;padding-left:1.2rem}
@@ -4020,6 +4029,21 @@ font:.85rem ui-sans-serif,system-ui,sans-serif}
    table itself scroll rather than the page: display:block puts the rows in an
    anonymous table box, so the columns still line up. */
 .lesson-table:not(.pairs){display:block;overflow-x:auto}
+/* The lesson contents wrap to four rows on a phone: 115px of sticky bar over
+   a 812px screen, and every anchor lands 35px behind it. One scrolling row
+   instead -- it stays a table of contents and stops being a lid. */
+.lesson-toc{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none}
+/* The two smallest labels on the site, sized next to a desktop body face.
+   Hold them at 12px where the page is read at arm's length. */
+.mc-tag,.repro figcaption{font-size:.75rem}
+}
+/* A finger is not a cursor. Anything that is a control in its own right -- a
+   chip, a breadcrumb, a nav pill, a link alone in a table cell -- gets a
+   finger-sized box on a touch screen; links inside a sentence keep the line
+   height they were written into. */
+@media (pointer:coarse){
+.crumb a,.facts a,.subnav a,.chips .chip,.lesson-toc a,.habit-toc a,.sched td a{
+min-height:2.75rem;display:inline-flex;align-items:center}
 }
 table.run td,table.run th{padding:.4rem .7rem .4rem 0}
 table.run .lines{text-align:right;font-variant-numeric:tabular-nums;
@@ -4057,7 +4081,7 @@ background:var(--panel)}
 .route li{margin:.4rem 0}
 .thin-list{list-style:none;padding:0;display:flex;flex-wrap:wrap;gap:.5rem 1.2rem;
 max-width:52rem;font-size:.92rem}
-.thin-list li{white-space:nowrap}
+.thin-list li .muted{white-space:nowrap}
 .foot{margin-top:4rem;padding-top:1rem;border-top:1px solid var(--line);
 font-size:.8rem;color:var(--muted);font-family:ui-sans-serif,system-ui,sans-serif}
 @media print{
